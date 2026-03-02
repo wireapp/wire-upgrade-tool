@@ -265,7 +265,16 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(1, 2, "Syncing binaries")
-        args = ["--generate-hosts", "--use-d", "--host-root", str(self.new_bundle), "--container-root", "/wire-server-deploy", "--verbose"]
+        args = [
+            "--generate-hosts",
+            "--use-d",
+            "--bundle", str(self.new_bundle),
+            "--host-root", str(self.new_bundle),
+            "--container-root", "/wire-server-deploy",
+            "--inventory", str(self.new_inventory),
+            "--source-hosts", str(self.old_inventory),
+            "--verbose",
+        ]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
@@ -279,10 +288,17 @@ class UpgradeOrchestrator:
             if err:
                 console.print(err, style="red")
         if rc != 0:
-            self.logger.warn(f"Binary sync returned: {rc}")
+            self.logger.error(f"Binary sync failed: {rc}")
+            return 1
 
         self.logger.step(2, 2, "Syncing container images")
-        args = ["--use-d", "--host-root", str(self.new_bundle), "--container-root", "/wire-server-deploy", "--verbose"]
+        args = [
+            "--use-d",
+            "--host-root", str(self.new_bundle),
+            "--container-root", "/wire-server-deploy",
+            "--inventory", str(self.new_inventory),
+            "--verbose",
+        ]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
@@ -306,7 +322,16 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(1, 1, "Syncing binaries")
-        args = ["--generate-hosts", "--use-d", "--host-root", str(self.new_bundle), "--container-root", "/wire-server-deploy", "--verbose"]
+        args = [
+            "--generate-hosts",
+            "--use-d",
+            "--bundle", str(self.new_bundle),
+            "--host-root", str(self.new_bundle),
+            "--container-root", "/wire-server-deploy",
+            "--inventory", str(self.new_inventory),
+            "--source-hosts", str(self.old_inventory),
+            "--verbose",
+        ]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
@@ -333,7 +358,13 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(1, 1, "Syncing container images")
-        args = ["--use-d", "--host-root", str(self.new_bundle), "--container-root", "/wire-server-deploy", "--verbose"]
+        args = [
+            "--use-d",
+            "--host-root", str(self.new_bundle),
+            "--container-root", "/wire-server-deploy",
+            "--inventory", str(self.new_inventory),
+            "--verbose",
+        ]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:

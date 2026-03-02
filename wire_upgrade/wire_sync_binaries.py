@@ -119,6 +119,10 @@ def main(argv=None):
 
     print_errors_warnings(errors, warnings)
 
+    if errors:
+        print("Aborting due to errors above.")
+        return 1
+
     audit = {
         "timestamp": now_ts(),
         "host": host_name(),
