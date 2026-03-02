@@ -1,0 +1,22 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.whl
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Configs with secrets
+upgrade-config.json
+
+# Logs
+*.log
+*.json.log
+
+# macOS
+.DS_Store
