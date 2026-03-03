@@ -265,18 +265,7 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(1, 2, "Syncing binaries")
-        args = [
-            "--generate-hosts",
-            "--use-d",
-            "--bundle", str(self.new_bundle),
-            "--host-root", str(self.new_bundle),
-            "--container-root", "/wire-server-deploy",
-            "--inventory", str(self.new_inventory),
-            "--source-hosts", str(self.old_inventory),
-            "--verbose",
-        ]
-        if self.config.kubeconfig:
-            args.extend(["--kubeconfig", self.config.kubeconfig])
+        args = ["--bundle", str(self.new_bundle), "--verbose"]
         if self.config.dry_run:
             args.append("--dry-run")
         if self.is_local:
@@ -292,13 +281,7 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(2, 2, "Syncing container images")
-        args = [
-            "--use-d",
-            "--host-root", str(self.new_bundle),
-            "--container-root", "/wire-server-deploy",
-            "--inventory", str(self.new_inventory),
-            "--verbose",
-        ]
+        args = ["--use-d", "--bundle", str(self.new_bundle), "--verbose"]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
@@ -315,27 +298,24 @@ class UpgradeOrchestrator:
         self.logger.success("Sync step completed")
         return 0
 
-    def cmd_sync_binaries(self) -> int:
+    def cmd_sync_binaries(self, dry_run=False, verbose=False, assethost="assethost", ssh_user="demo", tars=None, groups=None) -> int:
         console.print(Panel.fit(Text("SYNC BINARIES"), style="bold green"))
 
         if not self.validate_bundles():
             return 1
 
         self.logger.step(1, 1, "Syncing binaries")
-        args = [
-            "--generate-hosts",
-            "--use-d",
-            "--bundle", str(self.new_bundle),
-            "--host-root", str(self.new_bundle),
-            "--container-root", "/wire-server-deploy",
-            "--inventory", str(self.new_inventory),
-            "--source-hosts", str(self.old_inventory),
-            "--verbose",
-        ]
-        if self.config.kubeconfig:
-            args.extend(["--kubeconfig", self.config.kubeconfig])
-        if self.config.dry_run:
+        args = ["--bundle", str(self.new_bundle)]
+        if dry_run or self.config.dry_run:
             args.append("--dry-run")
+        if verbose:
+            args.append("--verbose")
+        args.extend(["--assethost", assethost, "--ssh-user", ssh_user])
+        for tar in (tars or ["all"]):
+            args.extend(["--tars", tar])
+        for group in (groups or ["all"]):
+            args.extend(["--groups", group])
+
         if self.is_local:
             rc = self.run_module(wire_sync_binaries.main, args)
         else:
@@ -345,7 +325,7 @@ class UpgradeOrchestrator:
             if err:
                 console.print(err, style="red")
         if rc != 0:
-            self.logger.warn(f"Binary sync returned: {rc}")
+            self.logger.error(f"Binary sync failed: {rc}")
             return rc
 
         self.logger.success("Binaries sync completed")
@@ -358,13 +338,7 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(1, 1, "Syncing container images")
-        args = [
-            "--use-d",
-            "--host-root", str(self.new_bundle),
-            "--container-root", "/wire-server-deploy",
-            "--inventory", str(self.new_inventory),
-            "--verbose",
-        ]
+        args = ["--use-d", "--bundle", str(self.new_bundle), "--verbose"]
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:

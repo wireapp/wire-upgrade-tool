@@ -1,121 +1,193 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import tarfile
+import tempfile
 from pathlib import Path
-import sys
 import datetime as dt
 
+from wire_upgrade.config import load_config
 from wire_upgrade.wire_sync_lib import (
-    BUNDLE_ROOT,
     now_ts,
     host_name,
     run_cmd,
-    tar_manifest,
-    detect_duplicates,
     write_audit,
     print_errors_warnings,
-    generate_hosts_ini,
     ssh_check,
-    to_container_path,
-    check_k8s_access,
-    build_ansible_cmd,
 )
+
+REMOTE_ASSETS_DIR = "/opt/assets"
+
+TAR_FILES = {
+    "binaries":          "binaries.tar",
+    "debs":              "debs-jammy.tar",
+    "containers-system": "containers-system.tar",
+    "containers-helm":   "containers-helm.tar",
+}
+
+# Maps a logical group name to filename prefixes inside the tar.
+# A binary belongs to a group if its basename starts with any of the listed prefixes.
+BINARY_GROUPS = {
+    "postgresql": [
+        "postgresql",           # postgresql-17_*, postgresql-client-*, postgresql-common_*
+        "repmgr",               # repmgr_*, repmgr-common_*
+        "libpq",                # libpq5_*
+        "python3-psycopg2",     # python3-psycopg2_*
+        "postgres_exporter",    # postgres_exporter-*
+    ],
+    "cassandra": [
+        "apache-cassandra",         # apache-cassandra-3.11.*-bin.tar.gz
+        "jmx_prometheus_javaagent", # jmx_prometheus_javaagent-*.jar
+    ],
+    "elasticsearch": [
+        "elasticsearch",        # elasticsearch-oss-*.deb
+    ],
+    "minio": [
+        "minio.",               # minio.RELEASE.*
+        "mc.",                  # mc.RELEASE.*
+    ],
+    "kubernetes": [
+        "kubeadm",              # kubeadm
+        "kubectl",              # kubectl
+        "kubelet",              # kubelet
+        "etcd",                 # etcd-v*.tar.gz
+        "crictl",               # crictl-v*.tar.gz
+        "calicoctl",            # calicoctl-linux-amd64
+    ],
+    "containerd": [
+        "containerd",           # containerd-*.tar.gz
+        "cni",                  # cni-plugins-linux-amd64-*.tgz
+        "nerdctl",              # nerdctl-*.tar.gz
+        "runc",                 # runc.amd64
+    ],
+    "helm": [
+        "v3.",                  # v3.26.4.tar.gz, v3.27.4.tar.gz
+    ],
+}
+
+
+def _check_remote_dir(ssh_user, assethost, remote_path):
+    rc, _, err, _ = run_cmd(
+        ["ssh", "-o", "BatchMode=yes", f"{ssh_user}@{assethost}", f"test -d {remote_path}"]
+    )
+    return rc == 0, err
+
+
+def _resolve_prefixes(groups):
+    """Return a flat list of filename prefixes for the given group names, or None for all."""
+    if not groups or "all" in groups:
+        return None
+    prefixes = []
+    for g in groups:
+        prefixes.extend(BINARY_GROUPS[g])
+    return prefixes
+
+
+def _extract_tar(tar_path, dest_dir, prefixes=None, verbose=False):
+    """Extract tar to dest_dir, optionally filtering to members matching prefix list."""
+    with tarfile.open(tar_path, mode="r:*") as tf:
+        if prefixes:
+            members = [
+                m for m in tf.getmembers()
+                if any(Path(m.name).name.startswith(p) for p in prefixes)
+            ]
+        else:
+            members = tf.getmembers()
+        if verbose:
+            print(f"  Extracting {len(members)} files from {tar_path.name} → {dest_dir}")
+        tf.extractall(dest_dir, members=members)
+
+
+def _rsync_to_assethost(local_dir, ssh_user, assethost, remote_path, verbose=False):
+    cmd = [
+        "rsync", "-rltz", "--no-owner", "--no-group",
+        "--rsync-path=sudo rsync",
+        "--progress" if verbose else "--quiet",
+        f"{local_dir}/",
+        f"{ssh_user}@{assethost}:{remote_path}/",
+    ]
+    return run_cmd(cmd)
+
+
+def _restart_serve_assets(ssh_user, assethost):
+    rc, _, err, _ = run_cmd([
+        "ssh", "-o", "BatchMode=yes", f"{ssh_user}@{assethost}",
+        "sudo systemctl daemon-reload && sudo systemctl enable serve-assets && sudo systemctl restart serve-assets",
+    ])
+    return rc == 0, err
+
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Sync offline binaries and assets to assethost with audit trail.",
+        description="Extract and sync offline binaries to assethost.",
     )
-    p.add_argument("--bundle", default=os.environ.get("WIRE_SYNC_BUNDLE", BUNDLE_ROOT))
-    p.add_argument("--inventory", default=os.environ.get("WIRE_SYNC_INVENTORY", f"{BUNDLE_ROOT}/ansible/inventory/offline/hosts.ini"))
-    p.add_argument("--playbook", default=os.environ.get("WIRE_SYNC_PLAYBOOK", f"{BUNDLE_ROOT}/ansible/setup-offline-sources.yml"))
-    p.add_argument("--log-dir", default=os.environ.get("WIRE_SYNC_LOG_DIR", "/var/log/audit_log"))
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--tags", default="")
-    p.add_argument("--extra-vars", default=f"src_path={BUNDLE_ROOT}")
+    p.add_argument("--config",    help="Path to upgrade-config.json")
+    p.add_argument("--bundle",    help="New bundle path (overrides config new_bundle)")
+    p.add_argument("--log-dir",   help="Audit log directory (overrides config log_dir)")
     p.add_argument("--assethost", default=os.environ.get("WIRE_SYNC_ASSETHOST", "assethost"))
-    p.add_argument("--ssh-user", default=os.environ.get("WIRE_SYNC_SSH_USER", "demo"))
-    p.add_argument("--generate-hosts", action="store_true")
-    p.add_argument("--template", default=os.environ.get("WIRE_SYNC_TEMPLATE", f"{BUNDLE_ROOT}/ansible/inventory/offline/99-static"))
-    p.add_argument("--source-hosts", default=os.environ.get("WIRE_SYNC_SOURCE_HOSTS", "/home/demo/wire-server-deploy/ansible/inventory/offline/hosts.ini"))
-    p.add_argument("--output-hosts", default=os.environ.get("WIRE_SYNC_INVENTORY", f"{BUNDLE_ROOT}/ansible/inventory/offline/hosts.ini"))
-    p.add_argument("--pause-after-generate", action="store_true")
-    p.add_argument("--fail-on-duplicates", action="store_true")
-    p.add_argument("--ansible-cmd", default="ansible-playbook")
-    p.add_argument("--use-d", action="store_true")
-    p.add_argument("--offline-env", default=os.environ.get("WIRE_SYNC_OFFLINE_ENV", f"{BUNDLE_ROOT}/bin/offline-env.sh"))
-    p.add_argument("--kubeconfig", default=os.environ.get("WIRE_SYNC_KUBECONFIG", f"{BUNDLE_ROOT}/ansible/inventory/kubeconfig.dec"))
-    p.add_argument("--host-root", default=os.environ.get("WIRE_SYNC_BUNDLE", BUNDLE_ROOT))
-    p.add_argument("--container-root", default=os.environ.get("WIRE_SYNC_CONTAINER_ROOT", "/wire-server-deploy"))
-    p.add_argument("--verbose", action="store_true", help="Show ansible playbook output in real-time")
+    p.add_argument("--ssh-user",  default=os.environ.get("WIRE_SYNC_SSH_USER", "demo"))
+    p.add_argument("--dry-run",   action="store_true")
+    p.add_argument("--verbose",   action="store_true", help="Show detailed progress")
+    p.add_argument(
+        "--tars",
+        nargs="+",
+        choices=list(TAR_FILES.keys()) + ["all"],
+        default=["all"],
+        metavar="TAR",
+        help=f"Tar archives to sync: {', '.join(TAR_FILES.keys())}, or all (default: all)",
+    )
+    p.add_argument(
+        "--groups",
+        nargs="+",
+        choices=list(BINARY_GROUPS.keys()) + ["all"],
+        default=["all"],
+        metavar="GROUP",
+        help=(
+            f"Binary groups to extract: {', '.join(BINARY_GROUPS.keys())}, or all (default: all). "
+            "Only files whose basename matches the group prefixes are extracted."
+        ),
+    )
     return p.parse_args(argv)
+
 
 def main(argv=None):
     args = parse_args(argv)
-    errors = []
+    cfg = load_config(Path(args.config) if args.config else None)
+
+    bundle   = Path(args.bundle  or cfg.get("new_bundle") or "")
+    log_dir  = Path(args.log_dir or cfg.get("log_dir")    or "/var/log/audit_log")
+    dry_run  = args.dry_run      or cfg.get("dry_run", False)
+    prefixes = _resolve_prefixes(args.groups)
+
+    if not bundle or not bundle.exists():
+        print(f"ERROR: bundle path not found: {bundle}")
+        return 1
+
+    errors   = []
     warnings = []
 
-    if args.generate_hosts:
-        ok = generate_hosts_ini(
-            Path(args.template),
-            Path(args.source_hosts),
-            Path(args.output_hosts),
-            errors,
-            warnings,
-        )
-        if ok:
-            if args.pause_after_generate:
-                input("Review the file, then press Enter to continue...")
-
-    bundle = Path(args.bundle)
-    inventory = Path(args.inventory)
-    playbook = Path(args.playbook)
-    log_dir = Path(args.log_dir)
-
-    tar_files = [
-        bundle / "binaries.tar",
-        bundle / "debs-jammy.tar",
-        bundle / "containers-system.tar",
-        bundle / "containers-helm.tar",
-    ]
-
-    manifests = {}
-    duplicates = {}
+    # Select which tar archives to process and verify they exist
+    tar_names = list(TAR_FILES.values()) if "all" in args.tars else [TAR_FILES[t] for t in args.tars]
+    tar_files = [bundle / name for name in tar_names]
     for tar_path in tar_files:
-        manifest = tar_manifest(tar_path, errors, warnings)
-        manifests[tar_path.name] = {
-            "entries": len(manifest),
-        }
-        dup = detect_duplicates(manifest)
-        if dup:
-            if args.fail_on_duplicates:
-                errors.append(f"Duplicates detected in {tar_path.name}: {len(dup)} groups")
-            duplicates[tar_path.name] = dup
-            warnings.append(f"Duplicates detected in {tar_path.name}: {len(dup)} groups (skipping duplicates in report)")
+        if not tar_path.exists():
+            errors.append(f"Missing tar file: {tar_path}")
 
-    if not inventory.exists():
-        errors.append(f"Missing inventory: {inventory}")
-    if not playbook.exists():
-        errors.append(f"Missing playbook: {playbook}")
-
+    # SSH pre-check
     ssh_ok, _, ssh_err = ssh_check(args.ssh_user, args.assethost)
     if not ssh_ok:
         errors.append(f"SSH to {args.ssh_user}@{args.assethost} failed: {ssh_err.strip()}")
 
-    k8s_rc, k8s_out, k8s_err, _ = check_k8s_access(args)
-    if k8s_rc != 0:
-        errors.append(f"Kubernetes access check failed: {k8s_err.strip() or k8s_out.strip()}")
-
-    summary = []
-    summary.append("wire_sync_binaries summary")
-    summary.append(f"timestamp: {now_ts()}")
-    summary.append(f"host: {host_name()}")
-    summary.append(f"bundle: {bundle}")
-    summary.append(f"inventory: {inventory}")
-    summary.append(f"playbook: {playbook}")
-    if duplicates:
-        summary.append(f"duplicates: {sum(len(v) for v in duplicates.values())} groups")
-    else:
-        summary.append("duplicates: none")
+    summary = [
+        "wire_sync_binaries summary",
+        f"timestamp: {now_ts()}",
+        f"host: {host_name()}",
+        f"bundle: {bundle}",
+        f"assethost: {args.assethost}",
+        f"tars: {', '.join(t.name for t in tar_files)}",
+        f"groups: {', '.join(args.groups)}",
+        f"prefixes: {', '.join(prefixes) if prefixes else 'all'}",
+    ]
 
     print_errors_warnings(errors, warnings)
 
@@ -127,55 +199,94 @@ def main(argv=None):
         "timestamp": now_ts(),
         "host": host_name(),
         "bundle": str(bundle),
-        "inventory": str(inventory),
-        "playbook": str(playbook),
-        "dry_run": args.dry_run,
-        "manifests": manifests,
-        "duplicates": duplicates,
+        "assethost": args.assethost,
+        "tars": [str(t) for t in tar_files],
+        "groups": args.groups,
+        "dry_run": dry_run,
         "errors": errors,
         "warnings": warnings,
     }
 
-    ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
 
-    if args.dry_run:
-        summary.append("result: dry-run (no ansible execution)")
+    sync_results = []
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        for tar_path in tar_files:
+            extract_dir = tmp_path / tar_path.stem
+            extract_dir.mkdir()
+
+            try:
+                _extract_tar(tar_path, extract_dir, prefixes=prefixes, verbose=False)
+            except Exception as exc:
+                print(f"ERROR: Failed to extract {tar_path.name}: {exc}")
+                return 1
+
+            extracted_files = sorted(f.name for f in extract_dir.rglob("*") if f.is_file())
+
+            if not extracted_files:
+                continue
+
+            print(f"Processing {tar_path.name}...")
+            if args.verbose or dry_run:
+                for fname in extracted_files:
+                    print(f"  {fname}")
+
+            result = {"tar": tar_path.name, "files": extracted_files}
+
+            if dry_run:
+                sync_results.append(result)
+                continue
+
+            if not hasattr(args, "_remote_checked"):
+                ok, err = _check_remote_dir(args.ssh_user, args.assethost, REMOTE_ASSETS_DIR)
+                if not ok:
+                    print(f"ERROR: {REMOTE_ASSETS_DIR} does not exist on {args.assethost}. Provision it first.")
+                    return 1
+                args._remote_checked = True
+
+            rc, _, err, duration = _rsync_to_assethost(
+                extract_dir, args.ssh_user, args.assethost, REMOTE_ASSETS_DIR, verbose=args.verbose
+            )
+            result["exit_code"] = rc
+            result["duration_ms"] = duration
+            sync_results.append(result)
+
+            if rc != 0:
+                print(f"ERROR: rsync failed for {tar_path.name}: {err.strip()}")
+                return 1
+
+            if args.verbose:
+                print(f"  {tar_path.name} synced in {duration}ms")
+
+    if dry_run:
+        summary.append("result: dry-run (no sync executed)")
+        audit["sync_results"] = sync_results
         json_path, txt_path = write_audit(log_dir, "binaries", audit, summary, ts_override=ts)
         print(f"Audit written: {json_path}")
         print(f"Summary written: {txt_path}")
         return 0
 
-    cmd = build_ansible_cmd(args, inventory, playbook)
-    rc, out, err, duration = run_cmd(cmd, verbose=args.verbose)
-    stdout_path = Path(log_dir) / f"{ts}_binaries_ansible_stdout.txt"
-    stderr_path = Path(log_dir) / f"{ts}_binaries_ansible_stderr.txt"
-    if args.verbose:
-        stdout_path.write_text("(output streamed to terminal)")
-        stderr_path.write_text("(output streamed to terminal)")
+    # Restart serve-assets on assethost
+    print("Restarting serve-assets on assethost...")
+    ok, err = _restart_serve_assets(args.ssh_user, args.assethost)
+    if not ok:
+        warnings.append(f"serve-assets restart failed: {err.strip()}")
+        print(f"WARN: serve-assets restart failed: {err.strip()}")
     else:
-        stdout_path.write_text(out)
-        stderr_path.write_text(err)
+        print("serve-assets restarted successfully.")
 
-    audit["ansible"] = {
-        "command": " ".join(cmd),
-        "exit_code": rc,
-        "duration_ms": duration,
-        "stdout_path": str(stdout_path),
-        "stderr_path": str(stderr_path),
-    }
-
-    summary.append(f"ansible_exit_code: {rc}")
-    summary.append(f"duration_ms: {duration}")
+    audit["sync_results"] = sync_results
+    summary.append(f"synced: {len(sync_results)} archives")
+    summary.append(f"serve_assets_restart: {'ok' if ok else 'failed'}")
 
     json_path, txt_path = write_audit(log_dir, "binaries", audit, summary, ts_override=ts)
     print(f"Audit written: {json_path}")
     print(f"Summary written: {txt_path}")
 
-    if rc != 0:
-        print("Ansible failed. See audit logs for details.")
-        sys.exit(rc)
-
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

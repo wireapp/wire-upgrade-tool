@@ -42,11 +42,24 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     @app.command("sync-binaries")
     def sync_binaries(
         ctx: typer.Context,
-        dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run: show what would be synced without transferring"),
+        verbose: bool = typer.Option(False, "--verbose", help="Show per-file progress"),
+        assethost: str = typer.Option("assethost", "--assethost", help="Assethost hostname"),
+        ssh_user: str = typer.Option("demo", "--ssh-user", help="SSH user for assethost"),
+        tars: Optional[List[str]] = typer.Option(None, "--tar",
+            help="Tar archives to sync: binaries, debs, containers-system, containers-helm (repeatable; default: all)"),
+        groups: Optional[List[str]] = typer.Option(None, "--group",
+            help="Binary groups to extract: postgresql, cassandra, elasticsearch, minio, kubernetes, containerd, helm (repeatable; default: all)"),
     ):
-        if dry_run:
-            ctx.obj["config"].dry_run = True
-        _run(ctx, "cmd_sync_binaries")
+        """Extract and sync offline binaries from the bundle to the assethost."""
+        _run(ctx, "cmd_sync_binaries",
+            dry_run=dry_run,
+            verbose=verbose,
+            assethost=assethost,
+            ssh_user=ssh_user,
+            tars=tars or ["all"],
+            groups=groups or ["all"],
+        )
 
     @app.command("sync-images")
     def sync_images(
