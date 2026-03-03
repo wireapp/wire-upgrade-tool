@@ -74,14 +74,63 @@ wire-upgrade status -n prod
 Run pre-upgrade sanity checks: cluster connectivity, inventory diff, Cassandra
 reachability, and MinIO connectivity.
 
-### sync / sync-binaries / sync-images
-Copy binaries and/or container images from the new bundle to the host.
+### sync
+Runs `sync-binaries` followed by `sync-images` in one step. Syncs all binaries
+and all container images with no filtering.
 
 ```sh
-wire-upgrade sync                # binaries + images
-wire-upgrade sync-binaries       # binaries only
-wire-upgrade sync-images         # images only
+wire-upgrade sync
 wire-upgrade sync --dry-run
+```
+
+### sync-binaries
+Extracts binaries from bundle tar archives and rsyncs them to `/opt/assets` on
+the assethost. After a successful sync, `serve-assets` is restarted so new
+files are served immediately. `/opt/assets` must already exist on the assethost.
+
+```sh
+# Sync all binaries from all tar archives (default)
+wire-upgrade sync-binaries
+
+# Sync only a specific group
+wire-upgrade sync-binaries --group postgresql
+
+# Sync multiple groups
+wire-upgrade sync-binaries --group postgresql --group cassandra
+
+# Restrict to a specific tar archive (skips scanning other tars)
+wire-upgrade sync-binaries --group postgresql --tar binaries
+
+# Preview what would be synced without transferring
+wire-upgrade sync-binaries --group postgresql --dry-run --verbose
+
+# Show per-file progress
+wire-upgrade sync-binaries --verbose
+```
+
+**`--tar` values:** `binaries`, `debs`, `containers-system`, `containers-helm`
+
+**`--group` values:**
+
+| Group | File prefixes |
+|---|---|
+| `postgresql` | `postgresql-*`, `repmgr*`, `libpq*`, `python3-psycopg2*`, `postgres_exporter*` |
+| `cassandra` | `apache-cassandra*`, `jmx_prometheus_javaagent*` |
+| `elasticsearch` | `elasticsearch*` |
+| `minio` | `minio.RELEASE.*`, `mc.RELEASE.*` |
+| `kubernetes` | `kubeadm`, `kubectl`, `kubelet`, `etcd*`, `crictl*`, `calicoctl*` |
+| `containerd` | `containerd*`, `cni-plugins*`, `nerdctl*`, `runc*` |
+| `helm` | `v3.*` |
+
+Tars with no matching files are silently skipped — only processed archives
+appear in the output and audit log.
+
+### sync-images
+Loads container images into containerd on cluster nodes via Ansible.
+
+```sh
+wire-upgrade sync-images
+wire-upgrade sync-images --dry-run
 ```
 
 ### backup
