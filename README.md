@@ -188,15 +188,15 @@ The recommended order of operations for a Wire Server upgrade:
 
 ```mermaid
 flowchart TD
-    A([start]) --> B[pre-check\nvalidate bundles, cluster, inventory,\nCassandra, MinIO]
-    B --> C[backup\ncreate Cassandra snapshot]
-    C --> D[sync-binaries\ncopy binaries to nodes]
-    D --> E[sync-images\nload container images into containerd]
-    E --> F[install-or-upgrade wire-server\n--sync-values first, then deploy]
-    F --> G[migrate --cassandra-migrations\nrun schema migrations]
-    G --> H[check-schema\nverify schema versions]
-    H --> I[migrate --migrate-features\nrun feature flag migrations]
-    I --> J[cleanup-containerd\nremove old images from nodes]
+    A([start]) --> B["pre-check<br/>validate bundles, cluster, inventory,<br/>Cassandra, MinIO"]
+    B --> C["backup<br/>create Cassandra snapshot"]
+    C --> D["sync-binaries<br/>copy binaries to nodes"]
+    D --> E["sync-images<br/>load container images into containerd"]
+    E --> F["migrate --cassandra-migrations<br/>run schema migrations"]
+    F --> G["check-schema<br/>verify schema versions"]
+    G --> H["migrate --migrate-features<br/>run feature flag migrations"]
+    H --> I["install-or-upgrade wire-server<br/>--sync-values first, then deploy"]
+    I --> J["cleanup-containerd<br/>remove old images from nodes"]
     J --> K([done])
 ```
 
