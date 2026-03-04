@@ -28,6 +28,8 @@ class Config(BaseModel):
     log_dir: str = LOG_DIR
     tools_dir: Optional[str] = None
     admin_host: str = "localhost"
+    assethost: str = "assethost"
+    ssh_user: str = "demo"
     dry_run: bool = False
     snapshot_name: Optional[str] = None
 
@@ -69,6 +71,9 @@ class Logger:
         )
         proc = subprocess.Popen(["bash", "-lc", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         out, err = proc.communicate()
+        if proc.returncode != 0:
+            if self.console:
+                self.console.print(f"[yellow]WARN[/yellow]: sudo mkdir failed for {self.log_dir}: {err.strip()}")
 
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -172,6 +177,8 @@ def resolve_config(
     log_dir: Optional[str],
     tools_dir: Optional[str],
     admin_host: Optional[str],
+    assethost: Optional[str],
+    ssh_user: Optional[str],
     dry_run: bool,
     snapshot_name: Optional[str],
 ) -> Config:
@@ -186,6 +193,8 @@ def resolve_config(
         "log_dir": log_dir or data.get("log_dir", LOG_DIR),
         "tools_dir": tools_dir or data.get("tools_dir"),
         "admin_host": admin_host or data.get("admin_host", "localhost"),
+        "assethost": assethost or data.get("assethost", "assethost"),
+        "ssh_user": ssh_user or data.get("ssh_user", "demo"),
         "dry_run": dry_run or data.get("dry_run", False),
         "snapshot_name": snapshot_name or data.get("snapshot_name"),
     }

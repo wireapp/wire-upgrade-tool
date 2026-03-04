@@ -3,7 +3,6 @@ import argparse
 import os
 import types
 from pathlib import Path
-import sys
 import datetime as dt
 
 from wire_upgrade.config import load_config
@@ -34,7 +33,10 @@ def parse_args(argv=None):
     p.add_argument("--use-d",     action="store_true")
     p.add_argument("--tags",      default="")
     p.add_argument("--skip-tags", default="")
-    p.add_argument("--precheck-assets", action="store_true", default=True)
+    p.add_argument("--precheck-assets", action="store_true", default=True,
+                   help="Check asset indexes on assethost before syncing (default: enabled)")
+    p.add_argument("--no-precheck-assets", dest="precheck_assets", action="store_false",
+                   help="Skip asset index pre-check")
     p.add_argument("--verbose",   action="store_true", help="Stream ansible output to terminal")
     return p.parse_args(argv)
 
@@ -158,7 +160,7 @@ def main(argv=None):
 
     if rc != 0:
         print("Ansible failed. See audit logs for details.")
-        sys.exit(rc)
+        return rc
 
     return 0
 

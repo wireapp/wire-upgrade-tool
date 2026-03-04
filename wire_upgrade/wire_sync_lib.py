@@ -273,19 +273,19 @@ def build_ansible_cmd(args, inventory, playbook):
     if args.use_d:
         inventory_c = to_container_path(str(inventory), args.host_root, args.container_root)
         playbook_c = to_container_path(str(playbook), args.host_root, args.container_root)
-        inner_cmd = f"ansible-playbook -i {inventory_c} {playbook_c}"
+        inner_cmd = f"ansible-playbook -i {shlex.quote(inventory_c)} {shlex.quote(playbook_c)}"
         extra_vars = getattr(args, 'extra_vars', '')
         if extra_vars:
             if extra_vars.startswith("src_path="):
                 src_path = extra_vars.split("=", 1)[1]
                 src_path_c = to_container_path(src_path, args.host_root, args.container_root)
                 extra_vars = f"src_path={src_path_c}"
-            inner_cmd += f" -e {extra_vars}"
+            inner_cmd += f" -e {shlex.quote(extra_vars)}"
         if args.tags:
-            inner_cmd += f" --tags {args.tags}"
+            inner_cmd += f" --tags {shlex.quote(args.tags)}"
         skip_tags = getattr(args, 'skip_tags', '')
         if skip_tags:
-            inner_cmd += f" --skip-tags {skip_tags}"
+            inner_cmd += f" --skip-tags {shlex.quote(skip_tags)}"
         bash_cmd = build_offline_cmd(
             inner_cmd,
             args.host_root,

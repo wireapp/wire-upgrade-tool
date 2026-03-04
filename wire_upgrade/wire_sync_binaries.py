@@ -210,6 +210,7 @@ def main(argv=None):
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
 
     sync_results = []
+    remote_dir_checked = False
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
 
@@ -239,12 +240,12 @@ def main(argv=None):
                 sync_results.append(result)
                 continue
 
-            if not hasattr(args, "_remote_checked"):
+            if not remote_dir_checked:
                 ok, err = _check_remote_dir(args.ssh_user, args.assethost, REMOTE_ASSETS_DIR)
                 if not ok:
                     print(f"ERROR: {REMOTE_ASSETS_DIR} does not exist on {args.assethost}. Provision it first.")
                     return 1
-                args._remote_checked = True
+                remote_dir_checked = True
 
             rc, _, err, duration = _rsync_to_assethost(
                 extract_dir, args.ssh_user, args.assethost, REMOTE_ASSETS_DIR, verbose=args.verbose

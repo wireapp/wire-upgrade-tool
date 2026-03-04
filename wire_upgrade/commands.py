@@ -34,18 +34,19 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     def sync(
         ctx: typer.Context,
         dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode"),
+        verbose: bool = typer.Option(False, "--verbose", help="Show detailed progress"),
     ):
         if dry_run:
             ctx.obj["config"].dry_run = True
-        _run(ctx, "cmd_sync")
+        _run(ctx, "cmd_sync", verbose=verbose)
 
     @app.command("sync-binaries")
     def sync_binaries(
         ctx: typer.Context,
         dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run: show what would be synced without transferring"),
         verbose: bool = typer.Option(False, "--verbose", help="Show per-file progress"),
-        assethost: str = typer.Option("assethost", "--assethost", help="Assethost hostname"),
-        ssh_user: str = typer.Option("demo", "--ssh-user", help="SSH user for assethost"),
+        assethost: Optional[str] = typer.Option(None, "--assethost", help="Assethost hostname (default: from config)"),
+        ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for assethost (default: from config)"),
         tars: Optional[List[str]] = typer.Option(None, "--tar",
             help="Tar archives to sync: binaries, debs, containers-system, containers-helm (repeatable; default: all)"),
         groups: Optional[List[str]] = typer.Option(None, "--group",
@@ -91,7 +92,7 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     ):
         """Back up Cassandra data for rollback."""
         if db != "cassandra":
-            console.print("Unsupported db: %s. Only cassandra is supported." % db)
+            console.print(f"Unsupported db: {db}. Only cassandra is supported.")
             raise typer.Exit(code=1)
         _run(ctx, "cmd_backup",
             list_snapshots=list_snapshots,
@@ -199,8 +200,11 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         _run(ctx, "cmd_cleanup_containerd", args=args_list)
 
     @app.command("cleanup-containerd-all")
-    def cleanup_containerd_all(ctx: typer.Context):
-        _run(ctx, "cmd_cleanup_containerd_all")
+    def cleanup_containerd_all(
+        ctx: typer.Context,
+        ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for connecting to kube nodes (default: from config)"),
+    ):
+        _run(ctx, "cmd_cleanup_containerd_all", ssh_user=ssh_user)
 
     @app.command("inventory-sync")
     def inventory_sync(ctx: typer.Context):
@@ -211,8 +215,12 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         _run(ctx, "cmd_inventory_validate")
 
     @app.command("assets-compare")
-    def assets_compare_cmd(ctx: typer.Context):
-        _run(ctx, "cmd_assets_compare")
+    def assets_compare_cmd(
+        ctx: typer.Context,
+        assethost: Optional[str] = typer.Option(None, "--assethost", help="Assethost hostname (default: from config)"),
+        ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for assethost (default: from config)"),
+    ):
+        _run(ctx, "cmd_assets_compare", assethost=assethost, ssh_user=ssh_user)
 
     @app.command("init-config")
     def init_config(
@@ -223,6 +231,8 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         log_dir: Optional[str] = typer.Option(None, "--log-dir", help="Log directory"),
         tools_dir: Optional[str] = typer.Option(None, "--tools-dir", help="Directory containing upgrade tools"),
         admin_host: Optional[str] = typer.Option(None, "--admin-host", help="Admin host to run commands on"),
+        assethost: Optional[str] = typer.Option(None, "--assethost", help="Assethost hostname"),
+        ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for assethost and kube nodes"),
         dry_run: bool = typer.Option(False, "--dry-run", help="Dry run mode"),
         snapshot_name: Optional[str] = typer.Option(None, "--snapshot-name", help="Snapshot name for rollback"),
     ):
@@ -238,6 +248,8 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             "log_dir": log_dir or "/var/log/upgrade-orchestrator",
             "tools_dir": tools_dir,
             "admin_host": admin_host or "localhost",
+            "assethost": assethost or "assethost",
+            "ssh_user": ssh_user or "demo",
             "dry_run": dry_run,
             "snapshot_name": snapshot_name,
         }

@@ -258,14 +258,16 @@ class UpgradeOrchestrator:
         self.logger.success("Pre-check completed")
         return 0
 
-    def cmd_sync(self) -> int:
+    def cmd_sync(self, verbose: bool = False) -> int:
         console.print(Panel.fit(Text("SYNC BINARIES AND IMAGES"), style="bold green"))
 
         if not self.validate_bundles():
             return 1
 
         self.logger.step(1, 2, "Syncing binaries")
-        args = ["--bundle", str(self.new_bundle), "--verbose"]
+        args = ["--bundle", str(self.new_bundle)]
+        if verbose:
+            args.append("--verbose")
         if self.config.dry_run:
             args.append("--dry-run")
         if self.is_local:
@@ -281,7 +283,9 @@ class UpgradeOrchestrator:
             return 1
 
         self.logger.step(2, 2, "Syncing container images")
-        args = ["--use-d", "--bundle", str(self.new_bundle), "--verbose"]
+        args = ["--use-d", "--bundle", str(self.new_bundle)]
+        if verbose:
+            args.append("--verbose")
         if self.config.kubeconfig:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
@@ -298,11 +302,14 @@ class UpgradeOrchestrator:
         self.logger.success("Sync step completed")
         return 0
 
-    def cmd_sync_binaries(self, dry_run=False, verbose=False, assethost="assethost", ssh_user="demo", tars=None, groups=None) -> int:
+    def cmd_sync_binaries(self, dry_run=False, verbose=False, assethost=None, ssh_user=None, tars=None, groups=None) -> int:
         console.print(Panel.fit(Text("SYNC BINARIES"), style="bold green"))
 
         if not self.validate_bundles():
             return 1
+
+        assethost = assethost or self.config.assethost
+        ssh_user = ssh_user or self.config.ssh_user
 
         self.logger.step(1, 1, "Syncing binaries")
         args = ["--bundle", str(self.new_bundle)]
@@ -766,8 +773,10 @@ class UpgradeOrchestrator:
             console.print(err, style="red")
         return rc
 
-    def cmd_cleanup_containerd_all(self) -> int:
+    def cmd_cleanup_containerd_all(self, ssh_user: Optional[str] = None) -> int:
         console.print(Panel.fit(Text("CLEANUP CONTAINERD ALL NODES"), style="bold green"))
+
+        ssh_user = ssh_user or self.config.ssh_user
 
         all_hosts, _all_vars, groups = wire_sync_lib.parse_hosts_ini(self.new_inventory)
         kube_hosts = set(groups.get("kube-master", [])) | set(groups.get("kube-node", []))
@@ -796,7 +805,7 @@ class UpgradeOrchestrator:
             ]
             ssh_cmd = [
                 "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                f"demo@{node}",
+                f"{ssh_user}@{node}",
                 "python3", str(tool_path),
             ] + args
             self.logger.info(f"Running on {node}: {' '.join(args)}")
@@ -854,11 +863,14 @@ class UpgradeOrchestrator:
         self.logger.success("Inventory validation passed")
         return 0
 
-    def cmd_assets_compare(self, assethost: str = "assethost", ssh_user: str = "demo") -> int:
+    def cmd_assets_compare(self, assethost: Optional[str] = None, ssh_user: Optional[str] = None) -> int:
         console.print(Panel.fit(Text("ASSET INDEX COMPARISON"), style="bold green"))
 
         if not self.validate_bundles():
             return 1
+
+        assethost = assethost or self.config.assethost
+        ssh_user = ssh_user or self.config.ssh_user
 
         results = assets_compare.compare_assets(self.new_bundle, assethost, ssh_user)
 
@@ -923,6 +935,8 @@ def main(
     log_dir: Optional[str] = typer.Option(None, "--log-dir", help="Log directory"),
     tools_dir: Optional[str] = typer.Option(None, "--tools-dir", help="Directory containing upgrade tools"),
     admin_host: Optional[str] = typer.Option(None, "--admin-host", help="Admin host to run commands on"),
+    assethost: Optional[str] = typer.Option(None, "--assethost", help="Assethost hostname (overrides config)"),
+    ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for assethost and kube nodes (overrides config)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Dry run mode"),
     snapshot_name: Optional[str] = typer.Option(None, "--snapshot-name", help="Snapshot name for rollback"),
 ):
@@ -938,6 +952,8 @@ def main(
             log_dir,
             tools_dir,
             admin_host,
+            assethost,
+            ssh_user,
             dry_run,
             snapshot_name,
         )

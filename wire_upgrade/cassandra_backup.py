@@ -532,6 +532,7 @@ def main(argv=None):
                 print("Restore cancelled.")
                 return 1
         
+        restore_errors = []
         for host in hosts:
             print(f"\n--- Host: {host} ---")
             for ks in keyspaces:
@@ -540,8 +541,14 @@ def main(argv=None):
                     print(f"  OK {ks}: restored from snapshot")
                 else:
                     print(f"  FAIL {ks}: {output}")
-        
-        print("\nWARNING: Restore attempts completed. Cassandra will only restart if restore succeeded.")
+                    restore_errors.append(f"{host}/{ks}: {output}")
+
+        if restore_errors:
+            print("\nRestore completed with errors:")
+            for err in restore_errors:
+                print(f"  - {err}")
+            return 1
+        print("\nRestore completed successfully.")
         return 0
     
     # Handle backup

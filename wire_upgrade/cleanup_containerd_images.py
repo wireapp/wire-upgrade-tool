@@ -8,11 +8,9 @@ import datetime as dt
 import re
 from pathlib import Path
 
-_offline_env = None
-
-def run(cmd, use_shell=False):
-    if use_shell and _offline_env:
-        cmd = "source %s && %s" % (_offline_env, cmd)
+def run(cmd, use_shell=False, offline_env=None):
+    if use_shell and offline_env:
+        cmd = "source %s && %s" % (offline_env, cmd)
     if use_shell:
         result = subprocess.run(["bash", "-c", cmd], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     else:
@@ -21,9 +19,9 @@ def run(cmd, use_shell=False):
         raise RuntimeError("Command failed code=%s: %s\n%s" % (result.returncode, cmd, result.stderr))
     return result.stdout
 
-def get_pod_images(kubectl_cmd, use_shell=False):
+def get_pod_images(kubectl_cmd, use_shell=False, offline_env=None):
     if use_shell:
-        data = run("%s get pods -A -o json" % kubectl_cmd, use_shell=True)
+        data = run("%s get pods -A -o json" % kubectl_cmd, use_shell=True, offline_env=offline_env)
     else:
         data = run([*kubectl_cmd, 'get', 'pods', '-A', '-o', 'json'])
     payload = json.loads(data)
@@ -123,11 +121,9 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
-    global _offline_env
     args = parse_args(argv)
 
-    if args.offline_env:
-        _offline_env = args.offline_env
+    offline_env = args.offline_env or None
 
     if not args.kubectl_shell and " " in args.kubectl_cmd.strip():
         args.kubectl_shell = True
@@ -136,7 +132,7 @@ def main(argv=None):
     if args.sudo:
         crictl_cmd = ['sudo', *crictl_cmd]
 
-    image_names, image_digests = get_pod_images(kubectl_cmd, use_shell=args.kubectl_shell)
+    image_names, image_digests = get_pod_images(kubectl_cmd, use_shell=args.kubectl_shell, offline_env=offline_env)
 
     use_crictl = is_executable(crictl_cmd)
     use_ctr = not use_crictl
