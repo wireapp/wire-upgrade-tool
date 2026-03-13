@@ -32,14 +32,14 @@ def _yaml_dump(data) -> str:
 
 
 def deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override dict into base dict.
+    """Recursively merge override dict into base dict. Override wins for existing keys.
 
     If both values are dicts, recurse. Otherwise, override wins.
     Preserves keys that appear only in base or only in override.
 
     Args:
-        base: The base dictionary (template).
-        override: The override dictionary (old values).
+        base: The base dictionary.
+        override: The override dictionary (wins on conflict).
 
     Returns:
         Merged dictionary.
@@ -50,6 +50,25 @@ def deep_merge(base: dict, override: dict) -> dict:
             result[key] = deep_merge(result[key], value)
         else:
             result[key] = value
+    return result
+
+
+def _fill_from_template(cluster: dict, template: dict) -> dict:
+    """Merge template into cluster values. Cluster wins; template only adds missing keys.
+
+    Args:
+        cluster: Live cluster values (source of truth, always wins).
+        template: Template dict providing defaults for keys absent in cluster.
+
+    Returns:
+        Merged dictionary with all cluster keys preserved and new template keys added.
+    """
+    result = cluster.copy()
+    for key, value in template.items():
+        if key not in result:
+            result[key] = value
+        elif isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _fill_from_template(result[key], value)
     return result
 
 
@@ -99,11 +118,11 @@ def sync_chart_values(
     - values/{chart_name}/secrets-backup-TIMESTAMP.yaml (auto-backup of helm secrets)
 
     The merge strategy:
-    - Template structure is the base
-    - Live cluster values override matching keys
-    - Keys only in template stay as-is
-    - Keys only in cluster values are included
-    - Nested dicts are merged recursively
+    - Live cluster values are the base (source of truth)
+    - Template only adds keys that are missing in cluster values
+    - Existing cluster values are never overwritten
+    - New fields introduced in the new Wire version get template defaults
+    - Values/secrets split is preserved via extract_values_for_template
 
     Args:
         new_bundle: Path to new bundle directory.
@@ -142,9 +161,14 @@ def sync_chart_values(
         logger.error(f"Failed to fetch helm values for release '{release}': {helm_stderr}")
         return False
 
-    # Parse helm output as YAML
+    # Parse helm output as YAML, stripping the "USER-SUPPLIED VALUES:" header
+    # that helm prepends to the output (it is valid YAML but adds a spurious null key)
+    helm_stdout_stripped = "\n".join(
+        line for line in helm_stdout.splitlines()
+        if not line.strip().startswith("USER-SUPPLIED VALUES")
+    )
     try:
-        helm_values = yaml.safe_load(helm_stdout) or {}
+        helm_values = yaml.safe_load(helm_stdout_stripped) or {}
     except Exception as exc:
         logger.error(f"Failed to parse helm values: {exc}")
         return False
@@ -165,9 +189,10 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_values_path}: {exc}")
             return False
 
-        # Extract helm values matching the template structure
+        # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_values = extract_values_for_template(template_values_dict, helm_values)
-        merged_values = deep_merge(template_values_dict, helm_values_for_values)
+        # Cluster is base; template fills in new keys only
+        merged_values = _fill_from_template(helm_values_for_values, template_values_dict)
 
         # Write merged values
         try:
@@ -185,9 +210,10 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_secrets_path}: {exc}")
             return False
 
-        # Extract helm values matching the template structure
+        # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_secrets = extract_values_for_template(template_secrets_dict, helm_values)
-        merged_secrets = deep_merge(template_secrets_dict, helm_values_for_secrets)
+        # Cluster is base; template fills in new keys only
+        merged_secrets = _fill_from_template(helm_values_for_secrets, template_secrets_dict)
 
         # Create backup of secrets (separate backup file)
         backup_secrets_path = values_dir / f"secrets-backup-{timestamp}.yaml"

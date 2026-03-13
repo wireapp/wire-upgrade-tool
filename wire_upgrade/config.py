@@ -7,6 +7,7 @@ import difflib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -33,15 +34,12 @@ class Config(BaseModel):
     dry_run: bool = False
     snapshot_name: Optional[str] = None
 
-    # Ensure that kubeconfig is explicitly provided and points to a valid file if set.
+    # If kubeconfig is explicitly set, verify the file exists at load time.
     @validator("kubeconfig")
     def validate_kubeconfig(cls, v):
         if v is None:
-            # solver will handle optionalness elsewhere; not raising here so config load can still
-            # succeed during init-config or other commands that don't require kubeconfig.
             return v
-        path = Path(v)
-        if not path.exists():
+        if not Path(v).exists():
             raise ValueError(f"kubeconfig file not found: {v}")
         return v
 
@@ -123,6 +121,36 @@ class Logger:
             json.dump({"timestamp": self.timestamp, "entries": self.entries}, f, indent=2)
 
 
+def _is_kubeconfig(path: Path) -> bool:
+    """Return True if the file looks like a kubeconfig (has kind: Config)."""
+    try:
+        content = path.read_text(errors="replace")
+        return "kind: Config" in content and "apiVersion:" in content
+    except Exception:
+        return False
+
+
+def find_kubeconfig_in_bundle(bundle_path: Path) -> Optional[Path]:
+    """Search common locations in a bundle directory for a kubeconfig file."""
+    candidates = [
+        bundle_path / "kubeconfig",
+        bundle_path / "admin.conf",
+        bundle_path / "kubeconfig.yaml",
+        bundle_path / "kubeconfig.conf",
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and _is_kubeconfig(candidate):
+            return candidate
+
+    # Fall back: any *.conf or kubeconfig* file in the bundle root
+    for pattern in ("*.conf", "kubeconfig*"):
+        for found in sorted(bundle_path.glob(pattern)):
+            if found.is_file() and _is_kubeconfig(found):
+                return found
+
+    return None
+
+
 def load_config(config_path: Optional[Path]) -> dict:
     candidates = []
 
@@ -198,6 +226,26 @@ def resolve_config(
         "dry_run": dry_run or data.get("dry_run", False),
         "snapshot_name": snapshot_name or data.get("snapshot_name"),
     }
+
+    # Auto-detect kubeconfig from old_bundle when not explicitly set
+    if not merged["kubeconfig"] and merged.get("old_bundle"):
+        old_bundle_path = Path(merged["old_bundle"])
+        if old_bundle_path.is_dir():
+            found = find_kubeconfig_in_bundle(old_bundle_path)
+            if found:
+                # Copy into new_bundle so all operations use a consistent path
+                if merged.get("new_bundle"):
+                    new_bundle_path = Path(merged["new_bundle"])
+                    dest = new_bundle_path / "kubeconfig"
+                    try:
+                        new_bundle_path.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(found, dest)
+                        merged["kubeconfig"] = str(dest)
+                    except Exception:
+                        # Fall back to the original path if the copy fails
+                        merged["kubeconfig"] = str(found)
+                else:
+                    merged["kubeconfig"] = str(found)
 
     try:
         return Config(**merged)

@@ -48,7 +48,7 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         assethost: Optional[str] = typer.Option(None, "--assethost", help="Assethost hostname (default: from config)"),
         ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for assethost (default: from config)"),
         tars: Optional[List[str]] = typer.Option(None, "--tar",
-            help="Tar archives to sync: binaries, debs, containers-system, containers-helm (repeatable; default: all)"),
+            help="Tar archives to sync: binaries, debs, containers-system, containers-helm, or all (repeatable; required)"),
         groups: Optional[List[str]] = typer.Option(None, "--group",
             help="Binary groups to extract: postgresql, cassandra, elasticsearch, minio, kubernetes, containerd, helm (repeatable; default: all)"),
     ):
@@ -58,8 +58,29 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             verbose=verbose,
             assethost=assethost,
             ssh_user=ssh_user,
-            tars=tars or ["all"],
+            tars=tars,
             groups=groups or ["all"],
+        )
+
+    @app.command("sync-chart-images")
+    def sync_chart_images(
+        ctx: typer.Context,
+        chart_name: Optional[str] = typer.Argument(None, help="Chart name (default: wire-server)"),
+        namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+        ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH user for k8s nodes (default: from config)"),
+        tars: Optional[List[str]] = typer.Option(None, "--tar",
+            help="Container tar archives to search: containers-helm, containers-system, or all (repeatable; default: containers-helm)"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Show matched images and target nodes without loading"),
+        verbose: bool = typer.Option(False, "--verbose", help="Show ctr output per node"),
+    ):
+        """Sync chart-specific images from bundle tars directly to k8s node containerd."""
+        _run(ctx, "cmd_sync_chart_images",
+            chart_name=chart_name or "wire-server",
+            namespace=namespace,
+            ssh_user=ssh_user,
+            tars=tars or ["containers-helm"],
+            dry_run=dry_run,
+            verbose=verbose,
         )
 
     @app.command("sync-images")
@@ -89,11 +110,16 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         archive_snapshots: bool = typer.Option(False, "--archive-snapshots", help="Archive snapshots to tar.gz"),
         archive_dir: Optional[str] = typer.Option(None, "--archive-dir", help="Directory to store snapshot archives"),
         yes: bool = typer.Option(False, "--yes", help="Skip restore confirmation prompt"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be done without executing"),
+        verify: bool = typer.Option(False, "--verify", help="Verify an existing snapshot is complete (requires --snapshot-name)"),
+        clear_snapshots: bool = typer.Option(False, "--clear-snapshots", help="Delete a snapshot from all nodes (requires --snapshot-name, irreversible)"),
     ):
         """Back up Cassandra data for rollback."""
         if db != "cassandra":
             console.print(f"Unsupported db: {db}. Only cassandra is supported.")
             raise typer.Exit(code=1)
+        if dry_run:
+            ctx.obj["config"].dry_run = True
         _run(ctx, "cmd_backup",
             list_snapshots=list_snapshots,
             snapshot_name=snapshot_name,
@@ -102,6 +128,8 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             archive_snapshots=archive_snapshots,
             archive_dir=archive_dir,
             yes=yes,
+            verify=verify,
+            clear_snapshots=clear_snapshots,
         )
 
     @app.command("migrate")

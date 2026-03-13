@@ -11,7 +11,7 @@ from typing import Callable, List, Optional, Tuple
 import yaml
 
 from wire_upgrade.config import Logger
-from wire_upgrade.values_sync import deep_merge
+from wire_upgrade.values_sync import deep_merge, _LiteralBlockDumper
 
 
 def find_values_files(new_bundle: Path, chart_name: str) -> List[str]:
@@ -218,9 +218,13 @@ def _show_values_diff(
         # No new values to compare
         return
 
-    # Normalize both sides to sorted YAML for a clean diff
-    current_yaml = yaml.dump(current_dict, default_flow_style=False, sort_keys=True)
-    new_yaml = yaml.dump(new_dict, default_flow_style=False, sort_keys=True)
+    # Normalize both sides to sorted YAML for a clean diff.
+    # Use _LiteralBlockDumper so multiline strings (e.g. PEM keys) are rendered
+    # as literal block scalars (|) on both sides — the same style used when
+    # writing values files. Without this, yaml.dump uses single-quoted flow style
+    # for multiline strings, producing false diffs against the on-disk format.
+    current_yaml = yaml.dump(current_dict, Dumper=_LiteralBlockDumper, default_flow_style=False, sort_keys=True)
+    new_yaml = yaml.dump(new_dict, Dumper=_LiteralBlockDumper, default_flow_style=False, sort_keys=True)
 
     if current_yaml == new_yaml:
         logger.info("No differences in values")
@@ -348,8 +352,10 @@ def install_or_upgrade(
             if not values:
                 logger.info(f"No values files found in values/{chart_name}/. Using chart defaults.")
     elif chart_name:
-        # Custom chart specified
-        if not chart:
+        # Custom chart specified.
+        # If chart is a bare name (no path separator, not absolute), treat it as a chart
+        # directory name under charts/ — e.g. "otel-collector" → "charts/otel-collector".
+        if not chart or ("/" not in chart and not chart.startswith("/")):
             chart = f"charts/{chart_name}"
         if not release:
             release = chart_name

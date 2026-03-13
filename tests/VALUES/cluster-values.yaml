@@ -1,0 +1,54 @@
+# Simulates live cluster values from the OLD Wire version (helm get values).
+# Notably: cannon has NO rabbitmq config — cannon didn't use RabbitMQ in the old version.
+# Cluster-specific overrides (smtp host, s3 endpoint) differ from the template defaults.
+tags:
+  federation: true
+  proxy: false
+brig:
+  replicaCount: 3
+  config:
+    cassandra:
+      host: cassandra-external
+    rabbitmq:
+      host: rabbitmq-external
+    elasticsearch:
+      host: elasticsearch-external
+    optSettings:
+      setFederationDomain: example.com
+    smtp:
+      host: smtp.cluster.example.com
+      port: 25
+      connType: plain
+cannon:
+  replicaCount: 3
+  drainTimeout: 10
+  config:
+    cassandra:
+      host: cassandra-external
+  metrics:
+    serviceMonitor:
+      enabled: true
+cargohold:
+  replicaCount: 3
+  config:
+    aws:
+      region: us-east-1
+      s3Bucket: cluster-wire-assets
+      s3Endpoint: https://s3.cluster.example.com/cluster-wire-assets
+      s3DownloadEndpoint: https://s3.cluster.example.com/cluster-wire-assets
+galley:
+  replicaCount: 3
+  config:
+    cassandra:
+      host: cassandra-external
+    rabbitmq:
+      host: rabbitmq-external
+gundeck:
+  replicaCount: 3
+  config:
+    rabbitmq:
+      host: rabbitmq-external
+    cassandra:
+      host: cassandra-external
+    redis:
+      host: redis-ephemeral

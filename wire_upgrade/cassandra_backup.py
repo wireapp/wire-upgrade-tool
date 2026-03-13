@@ -110,13 +110,40 @@ def run_ssh(host, cmd, key_check=False):
 
 
 def get_cassandra_hosts(inventory_path):
-    """Parse hosts.ini to get Cassandra node hosts."""
-    hosts = []
+    """Parse hosts.ini to get Cassandra node hosts.
+
+    Supports two inventory layouts:
+    - Inline: cassandra1 ansible_host=1.2.3.4  (ansible_host on the same line)
+    - Split:  [all] defines ansible_host, [cassandra] lists aliases only
+    """
     inventory = Path(inventory_path)
     if not inventory.exists():
         print(f"Error: Inventory file not found: {inventory_path}")
         return []
 
+    # First pass: build alias -> IP map from [all] section
+    alias_to_ip = {}
+    section = ""
+    for raw_line in inventory.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section.lower() != "all":
+            continue
+        parts = line.split()
+        if not parts or "=" in parts[0]:
+            continue
+        alias = parts[0]
+        for part in parts[1:]:
+            if part.startswith("ansible_host="):
+                alias_to_ip[alias] = part.split("=", 1)[1]
+                break
+
+    # Second pass: collect hosts from [cassandra*] sections
+    hosts = []
     section = ""
     for raw_line in inventory.read_text().splitlines():
         line = raw_line.strip()
@@ -129,31 +156,59 @@ def get_cassandra_hosts(inventory_path):
         if "cassandra" not in section_lower or section_lower.endswith(":vars"):
             continue
         parts = line.split()
-        if "=" in parts[0]:
+        if not parts or "=" in parts[0]:
             continue
-        host = parts[0]
+        alias = parts[0]
+        # Prefer inline ansible_host=, fall back to [all] section lookup
+        host = alias
         for part in parts[1:]:
             if part.startswith("ansible_host="):
                 host = part.split("=", 1)[1]
                 break
+        else:
+            host = alias_to_ip.get(alias, alias)
         hosts.append(host)
 
     return sorted(set(hosts))
 
 
-def create_snapshot(host, keyspace, snapshot_name, verbose=False):
-    """Create a Cassandra snapshot on a specific node."""
-    cmd = f"nodetool snapshot -t {snapshot_name} {keyspace}"
-    
+def flush_keyspaces(host, keyspaces, verbose=False):
+    """Flush memtables to SSTables for all keyspaces before snapshotting.
+
+    nodetool flush takes a single keyspace at a time, so we loop over each.
+    """
     if verbose:
-        print(f"[{host}] Creating snapshot '{snapshot_name}' for keyspace '{keyspace}'...")
-    
+        print(f"[{host}] Flushing keyspaces: {', '.join(keyspaces)}...")
+    # Chain one nodetool flush per keyspace — passing multiple in one call is
+    # interpreted as <keyspace> <table> <table>... which causes an error.
+    cmd = " && ".join(f"nodetool flush {ks}" for ks in keyspaces)
     rc, out, err = run_ssh(host, cmd)
-    
+    if rc != 0:
+        return False, (err or out).strip()
+    return True, out
+
+
+def create_snapshot(host, keyspaces, snapshot_name, verbose=False):
+    """Flush memtables then snapshot all keyspaces atomically on a single node.
+
+    Passing all keyspaces in one nodetool call is more atomic than looping
+    per keyspace — all tables are snapshotted in the same nodetool run.
+    """
+    ks_list = keyspaces if isinstance(keyspaces, list) else [keyspaces]
+
+    # Flush first so memtable data is included in the snapshot
+    ok, out = flush_keyspaces(host, ks_list, verbose)
+    if not ok:
+        print(f"WARN [{host}] flush failed (continuing): {out}")
+
+    cmd = f"nodetool snapshot -t {snapshot_name} {' '.join(ks_list)}"
+    if verbose:
+        print(f"[{host}] Creating snapshot '{snapshot_name}' for: {', '.join(ks_list)}...")
+
+    rc, out, err = run_ssh(host, cmd)
     if rc != 0:
         print(f"Error creating snapshot on {host}: {err}")
         return False, err
-    
     return True, out
 
 
@@ -165,7 +220,13 @@ def list_snapshots(host, keyspace="", snapshot_name="", verbose=False):
     if rc != 0:
         return False, combined_output or f"nodetool listsnapshots failed with code {rc}"
     if snapshot_name:
-        lines = [line for line in combined_output.splitlines() if snapshot_name in line]
+        # Match the first field exactly — nodetool listsnapshots has snapshot name
+        # as the first whitespace-separated column. Substring matching is too loose
+        # (e.g. "cobalt-atla" would match "cobalt-atlas").
+        lines = [
+            line for line in combined_output.splitlines()
+            if line.split() and line.split()[0] == snapshot_name
+        ]
         combined_output = "\n".join(lines).strip()
     return True, combined_output
 
@@ -275,21 +336,78 @@ def resolve_keyspaces(args, hosts):
     return [k.strip() for k in args.keyspaces.split(",")]
 
 
-def snapshot_has_files(host, keyspace, snapshot_name, verbose=False):
-    """Check if a snapshot directory exists and has data files."""
+def verify_snapshot(host, keyspace, snapshot_name, verbose=False):
+    """Verify a snapshot is complete across every table directory in the keyspace.
+
+    Returns (ok, report) where report is a dict with keys:
+      total    - number of table dirs found
+      ok       - table dirs with a non-empty snapshot
+      missing  - table dirs with no snapshot subdir
+      empty    - table dirs whose snapshot subdir has no files
+      issues   - list of human-readable problem strings
+    """
     cmd = (
         f"bash -lc '"
-        f"SNAPSHOT_DIR=$(find {CASSANDRA_DATA_DIR}/{keyspace}/ -path \"*/snapshots/{snapshot_name}\" -type d 2>/dev/null | head -1); "
-        f"if [ -z \"$SNAPSHOT_DIR\" ]; then echo MISSING; exit 0; fi; "
-        f"FILE=$(find $SNAPSHOT_DIR -type f 2>/dev/null | head -1); "
-        f"if [ -z \"$FILE\" ]; then echo EMPTY; else echo OK; fi'"
+        f"DATA_DIR={CASSANDRA_DATA_DIR}/{keyspace}; "
+        f"if [ ! -d \"$DATA_DIR\" ]; then echo NO_KEYSPACE; exit 1; fi; "
+        f"total=0; ok=0; missing=0; empty=0; "
+        f"for tdir in $(find \"$DATA_DIR\" -maxdepth 1 -mindepth 1 -type d); do "
+        f"  total=$((total+1)); "
+        f"  sdir=$tdir/snapshots/{snapshot_name}; "
+        f"  if [ ! -d \"$sdir\" ]; then echo \"MISSING:$(basename $tdir)\"; missing=$((missing+1)); continue; fi; "
+        f"  count=$(find \"$sdir\" -type f 2>/dev/null | wc -l); "
+        f"  if [ \"$count\" -eq 0 ]; then echo \"EMPTY:$(basename $tdir)\"; empty=$((empty+1)); continue; fi; "
+        f"  echo \"OK:$(basename $tdir):$count\"; ok=$((ok+1)); "
+        f"done; "
+        f"echo \"SUMMARY:$total:$ok:$missing:$empty\"'"
     )
     rc, out, err = run_ssh(host, cmd)
     if rc != 0:
         combined = (err or "").strip() or (out or "").strip()
-        return False, combined or "unknown error"
-    status = (out or "").strip()
-    return status == "OK", status
+        return False, {"issues": [combined or "ssh/bash error"]}
+
+    lines = (out or "").splitlines()
+    report = {"total": 0, "ok": 0, "missing": 0, "empty": 0, "issues": []}
+    for line in lines:
+        if line.startswith("SUMMARY:"):
+            parts = line.split(":")
+            report["total"]   = int(parts[1]) if len(parts) > 1 else 0
+            report["ok"]      = int(parts[2]) if len(parts) > 2 else 0
+            report["missing"] = int(parts[3]) if len(parts) > 3 else 0
+            report["empty"]   = int(parts[4]) if len(parts) > 4 else 0
+        elif line.startswith("MISSING:") or line.startswith("EMPTY:"):
+            report["issues"].append(line)
+        elif line == "NO_KEYSPACE":
+            report["issues"].append(f"keyspace directory not found: {CASSANDRA_DATA_DIR}/{keyspace}")
+
+    ok = report["missing"] == 0 and report["empty"] == 0 and report["total"] > 0
+    return ok, report
+
+
+def find_schema_cql(host, keyspace, snapshot_name):
+    """Return the path of schema.cql inside the snapshot, or None if not found."""
+    cmd = (
+        f"bash -lc '"
+        f"find {CASSANDRA_DATA_DIR}/{keyspace} "
+        f"-path \"*/snapshots/{snapshot_name}/schema.cql\" -type f | head -1'"
+    )
+    rc, out, _ = run_ssh(host, cmd)
+    path = (out or "").strip()
+    return path if rc == 0 and path else None
+
+
+def replay_schema(host, keyspace, snapshot_name, verbose=False):
+    """Replay schema.cql from the snapshot via cqlsh to recreate tables."""
+    schema_path = find_schema_cql(host, keyspace, snapshot_name)
+    if not schema_path:
+        return False, f"schema.cql not found in snapshot '{snapshot_name}' for keyspace '{keyspace}'"
+    if verbose:
+        print(f"[{host}] Replaying schema: {schema_path}")
+    cmd = f"cqlsh localhost -f {schema_path}"
+    rc, out, err = run_ssh(host, cmd)
+    if rc != 0:
+        return False, (err or out).strip()
+    return True, out
 
 
 def archive_snapshots(host, snapshot_name, keyspaces, archive_dir, verbose=False):
@@ -395,7 +513,12 @@ def parse_args(argv=None):
         action="store_true",
         help="Skip restore confirmation prompt"
     )
-    
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify an existing snapshot is complete across all table directories"
+    )
+
     return parser.parse_args(argv)
 
 
@@ -405,7 +528,7 @@ def main(argv=None):
     if args.restore and not snapshot_name:
         print("Error: --snapshot-name is required for --restore")
         return 1
-    if not snapshot_name and not (args.list_snapshots or args.list_keyspaces or args.archive_snapshots or args.clear_snapshots):
+    if not snapshot_name and not (args.list_snapshots or args.list_keyspaces or args.archive_snapshots or args.clear_snapshots or args.verify):
         snapshot_name = generate_snapshot_name()
     args.snapshot_name = snapshot_name
     
@@ -462,19 +585,71 @@ def main(argv=None):
                 print(f"Error: {output}")
         return 0
 
+    # Handle verify
+    if args.verify:
+        if not args.snapshot_name:
+            print("Error: --snapshot-name is required for --verify")
+            return 1
+        print(f"Verifying snapshot '{args.snapshot_name}'...")
+        all_ok = True
+        for host in hosts:
+            print(f"\n--- Host: {host} ---")
+            for ks in keyspaces:
+                ok, report = verify_snapshot(host, ks, args.snapshot_name, args.verbose)
+                if ok:
+                    print(f"  OK {ks}: {report['ok']}/{report['total']} tables complete")
+                else:
+                    all_ok = False
+                    print(f"  FAIL {ks}: {report['missing']} missing, {report['empty']} empty of {report['total']} tables")
+                    for issue in report["issues"]:
+                        print(f"    - {issue}")
+        return 0 if all_ok else 1
+
     # Handle clear-snapshots (manual)
     if args.clear_snapshots:
         if not args.snapshot_name:
             print("Error: --snapshot-name is required for --clear-snapshots")
             return 1
-        print("Clearing snapshots on Cassandra nodes...")
+
+        # Validate snapshot exists on each host before asking for confirmation
+        print(f"Checking if snapshot '{args.snapshot_name}' exists on all nodes...")
+        hosts_with_snapshot = []
+        hosts_without_snapshot = []
         for host in hosts:
+            ok, output = list_snapshots(host, snapshot_name=args.snapshot_name)
+            if not ok:
+                print(f"  WARN [{host}] could not query snapshots: {output}")
+                hosts_without_snapshot.append(host)
+            elif output.strip():
+                print(f"  FOUND {host}")
+                hosts_with_snapshot.append(host)
+            else:
+                print(f"  NOT FOUND {host}")
+                hosts_without_snapshot.append(host)
+
+        if not hosts_with_snapshot:
+            print(f"Error: snapshot '{args.snapshot_name}' not found on any node.")
+            return 1
+        if hosts_without_snapshot:
+            print(f"Warning: snapshot missing on: {', '.join(hosts_without_snapshot)}")
+
+        print(f"\nThis will permanently delete snapshot '{args.snapshot_name}' from {len(hosts_with_snapshot)} node(s).")
+        print("Live data is NOT affected, but the snapshot cannot be used for restore after deletion.")
+        if not args.yes:
+            confirm = input("Type 'yes' to confirm: ")
+            if confirm.strip().lower() != "yes":
+                print("Cancelled.")
+                return 1
+        print(f"Clearing snapshot '{args.snapshot_name}'...")
+        all_ok = True
+        for host in hosts_with_snapshot:
             success, output = clear_snapshot(host, args.snapshot_name, args.verbose)
             if success:
-                print(f"  OK {host}: snapshots cleared")
+                print(f"  OK {host}")
             else:
                 print(f"  FAIL {host}: {output}")
-        return 0
+                all_ok = False
+        return 0 if all_ok else 1
 
     # Handle archive-snapshots
     if args.archive_snapshots:
@@ -508,14 +683,20 @@ def main(argv=None):
         missing = []
         for host in hosts:
             for ks in keyspaces:
-                ok, status = snapshot_has_files(host, ks, args.snapshot_name, args.verbose)
+                ok, report = verify_snapshot(host, ks, args.snapshot_name, args.verbose)
                 if not ok:
-                    missing.append(f"{host}/{ks}: {status}")
+                    for issue in report["issues"]:
+                        missing.append(f"{host}/{ks}: {issue}")
+                    if report.get("total", 0) > 0:
+                        missing.append(
+                            f"{host}/{ks}: {report['missing']} missing, "
+                            f"{report['empty']} empty of {report['total']} tables"
+                        )
         if missing:
             print("Snapshot verification failed:")
             for item in missing:
                 print(f"  - {item}")
-            print("Restore aborted before stopping Cassandra.")
+            print("Restore aborted.")
             return 1
         
         if args.dry_run:
@@ -572,29 +753,31 @@ def main(argv=None):
         "errors": [],
     }
     
-    # Create snapshots on all hosts
+    # Create snapshots on all hosts — flush + snapshot all keyspaces in one call per host
     print("Creating snapshots...")
     for host in hosts:
         print(f"\n--- Host: {host} ---")
+        success, output = create_snapshot(host, keyspaces, args.snapshot_name, args.verbose)
+        if not success:
+            print(f"  FAIL: {output}")
+            for ks in keyspaces:
+                results["errors"].append({"host": host, "keyspace": ks, "error": output})
+            continue
+
+        # Verify every table dir in each keyspace has a complete snapshot
         for ks in keyspaces:
-            success, output = create_snapshot(host, ks, args.snapshot_name, args.verbose)
-            
-            if success:
-                size = get_snapshot_size(host, args.snapshot_name, args.verbose)
-                print(f"  OK {ks}: snapshot created (size: {size})")
+            ok, report = verify_snapshot(host, ks, args.snapshot_name, args.verbose)
+            size = get_snapshot_size(host, args.snapshot_name, args.verbose)
+            if ok:
+                print(f"  OK {ks}: {report['ok']}/{report['total']} tables verified (size: {size})")
                 results["backups"].append({
-                    "host": host,
-                    "keyspace": ks,
-                    "status": "success",
-                    "size": size
+                    "host": host, "keyspace": ks,
+                    "status": "success", "tables": report["ok"], "size": size,
                 })
             else:
-                print(f"  FAIL {ks}: {output}")
-                results["errors"].append({
-                    "host": host,
-                    "keyspace": ks,
-                    "error": output
-                })
+                issues = "; ".join(report["issues"]) or "incomplete snapshot"
+                print(f"  WARN {ks}: {issues}")
+                results["errors"].append({"host": host, "keyspace": ks, "error": issues})
     
     
     # Summary

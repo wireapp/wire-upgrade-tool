@@ -1,0 +1,58 @@
+# Simulates prod-values.example.yaml from a new Wire bundle.
+# cannon.config.rabbitmq is present here (new in this version).
+tags:
+  federation: true
+  proxy: false
+brig:
+  replicaCount: 2
+  config:
+    cassandra:
+      host: cassandra-external
+    rabbitmq:
+      host: rabbitmq-external
+      heartbeatTimeout: 30
+    elasticsearch:
+      host: elasticsearch-external
+    optSettings:
+      setFederationDomain: example.com
+    smtp:
+      host: smtp.example.com
+      port: 587
+      connType: plain
+cannon:
+  replicaCount: 2
+  drainTimeout: 10
+  config:
+    rabbitmq:
+      host: rabbitmq-external
+      heartbeatTimeout: 30
+    cassandra:
+      host: cassandra-external
+  metrics:
+    serviceMonitor:
+      enabled: true
+cargohold:
+  replicaCount: 2
+  config:
+    aws:
+      region: us-east-1
+      s3Bucket: wire-assets
+      s3Endpoint: https://s3.example.com/wire-assets
+      s3DownloadEndpoint: https://s3.example.com/wire-assets
+galley:
+  replicaCount: 2
+  config:
+    cassandra:
+      host: cassandra-external
+    rabbitmq:
+      host: rabbitmq-external
+gundeck:
+  replicaCount: 2
+  config:
+    rabbitmq:
+      host: rabbitmq-external
+      heartbeatTimeout: 30
+    cassandra:
+      host: cassandra-external
+    redis:
+      host: redis-ephemeral

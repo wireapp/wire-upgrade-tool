@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -74,7 +75,11 @@ def _check_remote_dir(ssh_user, assethost, remote_path):
 
 
 def _resolve_prefixes(groups):
-    """Return a flat list of filename prefixes for the given group names, or None for all."""
+    """Return a flat list of filename prefixes for the given group names, or None for all.
+
+    argparse enforces that every entry in `groups` is a key of BINARY_GROUPS (or 'all'),
+    so the dict access below is safe by construction.
+    """
     if not groups or "all" in groups:
         return None
     prefixes = []
@@ -85,6 +90,8 @@ def _resolve_prefixes(groups):
 
 def _extract_tar(tar_path, dest_dir, prefixes=None, verbose=False):
     """Extract tar to dest_dir, optionally filtering to members matching prefix list."""
+    # filter='data' (Python 3.12+) suppresses DeprecationWarning and blocks unsafe paths
+    extract_kwargs = {"filter": "data"} if sys.version_info >= (3, 12) else {}
     with tarfile.open(tar_path, mode="r:*") as tf:
         if prefixes:
             members = [
@@ -95,7 +102,7 @@ def _extract_tar(tar_path, dest_dir, prefixes=None, verbose=False):
             members = tf.getmembers()
         if verbose:
             print(f"  Extracting {len(members)} files from {tar_path.name} → {dest_dir}")
-        tf.extractall(dest_dir, members=members)
+        tf.extractall(dest_dir, members=members, **extract_kwargs)
 
 
 def _rsync_to_assethost(local_dir, ssh_user, assethost, remote_path, verbose=False):
@@ -132,9 +139,9 @@ def parse_args(argv=None):
         "--tars",
         nargs="+",
         choices=list(TAR_FILES.keys()) + ["all"],
-        default=["all"],
+        default=None,
         metavar="TAR",
-        help=f"Tar archives to sync: {', '.join(TAR_FILES.keys())}, or all (default: all)",
+        help=f"Tar archives to sync: {', '.join(TAR_FILES.keys())}, or all (required)",
     )
     p.add_argument(
         "--groups",
@@ -157,7 +164,25 @@ def main(argv=None):
     bundle   = Path(args.bundle  or cfg.get("new_bundle") or "")
     log_dir  = Path(args.log_dir or cfg.get("log_dir")    or "/var/log/audit_log")
     dry_run  = args.dry_run      or cfg.get("dry_run", False)
+    if args.tars is None:
+        print(
+            "ERROR: --tars is required.\n"
+            f"       Choose one or more: {', '.join(TAR_FILES.keys())}\n"
+            "       Or pass --tars all to sync every archive."
+        )
+        return 1
+
     prefixes = _resolve_prefixes(args.groups)
+
+    # --groups only applies to binaries.tar; error if the selected tars don't include it
+    groups_specified = args.groups != ["all"]
+    if groups_specified and "all" not in args.tars and "binaries" not in args.tars:
+        print(
+            "ERROR: --groups only applies to the 'binaries' tar archive.\n"
+            f"       Selected tars ({', '.join(args.tars)}) do not include 'binaries'.\n"
+            "       Either add --tars binaries, or drop --groups."
+        )
+        return 1
 
     if not bundle or not bundle.exists():
         print(f"ERROR: bundle path not found: {bundle}")
@@ -173,10 +198,11 @@ def main(argv=None):
         if not tar_path.exists():
             errors.append(f"Missing tar file: {tar_path}")
 
-    # SSH pre-check
-    ssh_ok, _, ssh_err = ssh_check(args.ssh_user, args.assethost)
-    if not ssh_ok:
-        errors.append(f"SSH to {args.ssh_user}@{args.assethost} failed: {ssh_err.strip()}")
+    # SSH pre-check — skip if tars are already missing to avoid a misleading second error
+    if not errors:
+        ssh_ok, _, ssh_err = ssh_check(args.ssh_user, args.assethost)
+        if not ssh_ok:
+            errors.append(f"SSH to {args.ssh_user}@{args.assethost} failed: {ssh_err.strip()}")
 
     summary = [
         "wire_sync_binaries summary",
@@ -185,8 +211,8 @@ def main(argv=None):
         f"bundle: {bundle}",
         f"assethost: {args.assethost}",
         f"tars: {', '.join(t.name for t in tar_files)}",
-        f"groups: {', '.join(args.groups)}",
-        f"prefixes: {', '.join(prefixes) if prefixes else 'all'}",
+        f"groups (binaries only): {', '.join(args.groups)}",
+        f"prefixes (binaries only): {', '.join(prefixes) if prefixes else 'all'}",
     ]
 
     print_errors_warnings(errors, warnings)
@@ -210,7 +236,13 @@ def main(argv=None):
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
 
     sync_results = []
-    remote_dir_checked = False
+
+    if not dry_run:
+        ok, err = _check_remote_dir(args.ssh_user, args.assethost, REMOTE_ASSETS_DIR)
+        if not ok:
+            print(f"ERROR: {REMOTE_ASSETS_DIR} does not exist on {args.assethost}. Provision it first.")
+            return 1
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
 
@@ -218,8 +250,10 @@ def main(argv=None):
             extract_dir = tmp_path / tar_path.stem
             extract_dir.mkdir()
 
+            # Group prefix filtering only applies to binaries.tar; other tars are extracted fully
+            effective_prefixes = prefixes if tar_path.name == TAR_FILES["binaries"] else None
             try:
-                _extract_tar(tar_path, extract_dir, prefixes=prefixes, verbose=False)
+                _extract_tar(tar_path, extract_dir, prefixes=effective_prefixes, verbose=False)
             except Exception as exc:
                 print(f"ERROR: Failed to extract {tar_path.name}: {exc}")
                 return 1
@@ -227,6 +261,11 @@ def main(argv=None):
             extracted_files = sorted(f.name for f in extract_dir.rglob("*") if f.is_file())
 
             if not extracted_files:
+                if effective_prefixes:
+                    print(f"WARN: {tar_path.name}: no files matched groups {args.groups} — skipping")
+                else:
+                    print(f"WARN: {tar_path.name}: archive is empty — skipping")
+                warnings.append(f"{tar_path.name}: nothing extracted")
                 continue
 
             print(f"Processing {tar_path.name}...")
@@ -239,13 +278,6 @@ def main(argv=None):
             if dry_run:
                 sync_results.append(result)
                 continue
-
-            if not remote_dir_checked:
-                ok, err = _check_remote_dir(args.ssh_user, args.assethost, REMOTE_ASSETS_DIR)
-                if not ok:
-                    print(f"ERROR: {REMOTE_ASSETS_DIR} does not exist on {args.assethost}. Provision it first.")
-                    return 1
-                remote_dir_checked = True
 
             rc, _, err, duration = _rsync_to_assethost(
                 extract_dir, args.ssh_user, args.assethost, REMOTE_ASSETS_DIR, verbose=args.verbose

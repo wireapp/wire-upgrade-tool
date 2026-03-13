@@ -133,6 +133,30 @@ wire-upgrade sync-images
 wire-upgrade sync-images --dry-run
 ```
 
+### sync-chart-images
+Syncs only the images required by a specific Helm chart directly from the
+bundle tars to each k8s node's containerd (no assethost involved). Uses
+`helm template` to determine which images the chart needs, then streams
+matching entries from `containers-helm.tar` (or `containers-system.tar`)
+via SSH to each node.
+
+```sh
+# Sync wire-server images (default)
+wire-upgrade sync-chart-images
+
+# Sync a specific chart
+wire-upgrade sync-chart-images cassandra-external -n prod
+
+# Preview without loading
+wire-upgrade sync-chart-images --dry-run
+
+# Show ctr output per node
+wire-upgrade sync-chart-images --verbose
+
+# Search additional tar archive
+wire-upgrade sync-chart-images --tar containers-helm --tar containers-system
+```
+
 ### backup
 Cassandra snapshot management.
 
@@ -200,11 +224,13 @@ wire-upgrade install-or-upgrade wire-server --dry-run
 over `prod-values.example.yaml` / `prod-secrets.example.yaml`). Pass `--values`
 explicitly to override.
 
-**`--sync-values`:** fetches live helm values from the cluster, merges them into
-the bundle templates, and writes `values.yaml` / `secrets.yaml`. For
-`wire-server` it also syncs the PostgreSQL password from the cluster secret.
-This flag syncs only — it does not deploy. Run `install-or-upgrade` again
-without the flag to deploy.
+**`--sync-values`:** fetches live helm values from the cluster and merges them
+with the new bundle templates, writing `values.yaml` / `secrets.yaml`. The
+merge strategy keeps live cluster values as the source of truth — template
+defaults only fill in keys that are absent from the cluster (e.g. new config
+fields introduced in the new Wire version). For `wire-server` it also syncs the
+PostgreSQL password from the cluster secret. This flag syncs only — it does not
+deploy. Run `install-or-upgrade` again without the flag to deploy.
 
 ### cleanup-containerd / cleanup-containerd-all
 Remove unused container images from containerd on one or all nodes.
@@ -281,10 +307,14 @@ flowchart TD
 ```mermaid
 flowchart LR
     A[helm get values\nrelease -n namespace] --> B[parse YAML]
-    B --> C[extract keys matching\nprod-values.example.yaml]
-    C --> D[deep merge:\ntemplate base +\ncluster values override]
-    D --> E[write values.yaml\nwrite secrets.yaml]
+    B --> C[extract_values_for_template\nfilter to values.yaml keys]
+    C --> D[_fill_from_template\ncluster is base —\ntemplate adds missing keys only]
+    D --> E[write values.yaml]
+    B --> C2[extract_values_for_template\nfilter to secrets.yaml keys]
+    C2 --> D2[_fill_from_template\ncluster is base —\ntemplate adds missing keys only]
+    D2 --> E2[write secrets.yaml]
     E --> F[write timestamped\nbackup files]
+    E2 --> F
 
     G[kubectl get secret\npg-external-secret] --> H[base64 decode]
     H --> I[find services with\nconfig.postgresql\nin values.yaml]
@@ -332,6 +362,25 @@ invoking the command. All subprocesses return `(rc, stdout, stderr)` tuples.
 Chart installation logic lives in `wire_upgrade/chart_install.py`. Values
 sync logic lives in `wire_upgrade/values_sync.py`. The CLI command registration
 is in `wire_upgrade/commands.py`.
+
+---
+
+## Testing
+
+```sh
+python3 -m pytest tests/ -v
+```
+
+Tests are in `tests/test_values_sync.py` and cover the values merge logic in
+`wire_upgrade/values_sync.py`:
+
+- **Unit tests** — `_fill_from_template`, `deep_merge`, `extract_values_for_template`
+- **Integration tests** — full `sync_chart_values` flow using fixture files in
+  `tests/VALUES/`
+
+The fixture files committed to the repo use clearly-fake placeholder values
+(`AKIAIOSFODNN7EXAMPLE`, `cluster-brig-pg-password`, etc.). Production fixture
+files containing real cluster data are listed in `.gitignore` and kept locally.
 
 ---
 

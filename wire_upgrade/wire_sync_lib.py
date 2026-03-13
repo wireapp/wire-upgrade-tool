@@ -229,14 +229,32 @@ def build_offline_cmd(
     offline_env="bin/offline-env.sh",
     kubeconfig=None,
 ):
-    """Build a bash command that cd's into the bundle, sources offline-env.sh, and runs cmd."""
+    """Build a bash command that cd's into the bundle, sources offline-env.sh, and runs cmd.
+
+    When use_d=True the command runs inside the bundle container via the d() shell function.
+    The d() function mounts $PWD (bundle_dir) at /wire-server-deploy inside the container but
+    does NOT forward env vars.  To make KUBECONFIG available inside the container we wrap the
+    command as:  d bash -c "KUBECONFIG=/wire-server-deploy/<rel> <cmd>"
+    This only works when the kubeconfig file is inside the bundle dir.  If the kubeconfig is
+    outside the bundle dir (not mounted) it is silently ignored for d commands.
+    """
     parts = [f"cd {shlex.quote(bundle_dir)}", f"source {offline_env}"]
-    run_part = ""
-    if kubeconfig:
-        run_part += f"KUBECONFIG={shlex.quote(kubeconfig)} "
     if use_d:
-        run_part += f"d {cmd}"
+        if kubeconfig:
+            bundle_prefix = bundle_dir.rstrip("/") + "/"
+            if kubeconfig.startswith(bundle_prefix):
+                rel = kubeconfig[len(bundle_prefix):]
+                container_kube = f"/wire-server-deploy/{rel}"
+                inner = f"KUBECONFIG={shlex.quote(container_kube)} {cmd}"
+                run_part = f"d bash -c {shlex.quote(inner)}"
+            else:
+                run_part = f"d {cmd}"
+        else:
+            run_part = f"d {cmd}"
     else:
+        run_part = ""
+        if kubeconfig:
+            run_part += f"KUBECONFIG={shlex.quote(kubeconfig)} "
         run_part += cmd
     parts.append(run_part)
     return " && ".join(parts)

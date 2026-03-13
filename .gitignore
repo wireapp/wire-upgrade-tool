@@ -20,3 +20,15 @@ upgrade-config.json
 
 # macOS
 .DS_Store
+
+# Local production fixture files (keep locally, never commit)
+tests/VALUES/values.yaml
+tests/VALUES/values-backup.yaml
+tests/VALUES/secrets.yml
+tests/VALUES/secrets-backup.yml
+tests/VALUES/new-values.yaml
+tests/VALUES/new-secrets.yaml
+tests/VALUES/prod-values.example.yaml
+tests/VALUES/prod-secrets.example.yaml
+tests/VALUES/generated-values.yaml
+tests/VALUES/generated-secrets.yaml

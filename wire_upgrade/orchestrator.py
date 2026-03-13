@@ -25,8 +25,6 @@ from rich.text import Text
 from wire_upgrade import cassandra_backup
 from wire_upgrade import wire_sync_lib
 from wire_upgrade import cleanup_containerd_images
-from wire_upgrade import wire_sync_binaries
-from wire_upgrade import wire_sync_images
 from wire_upgrade import inventory_sync as inv_sync
 from wire_upgrade import assets_compare
 from wire_upgrade import chart_operations
@@ -92,13 +90,32 @@ class UpgradeOrchestrator:
             if not tool.exists():
                 errors.append(f"Missing tool: {tool}")
 
-        # kubeconfig must be provided and point to an existing file; do not fall back to default
-        if not self.config.kubeconfig:
-            errors.append("kubeconfig path not specified in configuration")
-        else:
+        # kubeconfig is optional — d kubectl uses /root/.kube/config inside the container
+        if self.config.kubeconfig:
             kube_path = Path(self.config.kubeconfig)
             if not kube_path.exists():
                 errors.append(f"kubeconfig file not found: {kube_path}")
+        else:
+            self.logger.warn("kubeconfig not set; d kubectl will use the container's /root/.kube/config")
+
+        # Check that the d shell function is available after sourcing offline-env.sh
+        offline_env = self.new_bundle / "bin" / "offline-env.sh"
+        if offline_env.exists():
+            check_cmd = (
+                f"cd {shlex.quote(str(self.new_bundle))} && "
+                f"source bin/offline-env.sh && "
+                f"type d > /dev/null 2>&1"
+            )
+            argv = wire_sync_lib.build_exec_argv(
+                check_cmd,
+                remote_host=None if self.is_local else self.config.admin_host,
+            )
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc.communicate()
+            if proc.returncode != 0:
+                errors.append("d shell function not found after sourcing bin/offline-env.sh")
+            else:
+                self.logger.info("d shell function is available")
 
         if errors:
             for err in errors:
@@ -119,14 +136,6 @@ class UpgradeOrchestrator:
 
 
     def run_kubectl(self, cmd: str, use_d: bool = True) -> tuple[int, str, str]:
-        # enforce that kubeconfig is explicitly defined and valid.
-        if not self.kubeconfig:
-            self.logger.error("Attempted to run kubectl without kubeconfig set in configuration")
-            return 1, "", "no kubeconfig"
-        if not Path(self.kubeconfig).exists():
-            self.logger.error(f"kubeconfig file does not exist: {self.kubeconfig}")
-            return 1, "", "kubeconfig missing"
-
         full_cmd = wire_sync_lib.build_offline_cmd(
             cmd, str(self.new_bundle), use_d=use_d, kubeconfig=self.kubeconfig,
         )
@@ -156,12 +165,15 @@ class UpgradeOrchestrator:
         out, err = proc.communicate()
         return proc.returncode, out, err
 
-    def run_module(self, func, argv: list[str]) -> int:
-        try:
-            return int(func(argv))
-        except SystemExit as exc:
-            code = exc.code
-            return int(code) if code is not None else 1
+    def _run_tool(self, module_file: str, args: list[str]) -> int:
+        """Run a bundled tool script and stream its output through the console."""
+        tool_path = self.tools_dir / module_file
+        rc, out, err = self.run_tool(tool_path, args)
+        if out:
+            console.print(out)
+        if err:
+            console.print(err, style="red")
+        return rc
 
     def check_cluster_status(self, namespace: str = "default") -> bool:
         self.logger.info("Checking Kubernetes cluster status...")
@@ -270,14 +282,7 @@ class UpgradeOrchestrator:
             args.append("--verbose")
         if self.config.dry_run:
             args.append("--dry-run")
-        if self.is_local:
-            rc = self.run_module(wire_sync_binaries.main, args)
-        else:
-            tool_path = self.tools_dir / "wire_sync_binaries.py"
-            rc, out, err = self.run_tool(tool_path, args)
-            console.print(out)
-            if err:
-                console.print(err, style="red")
+        rc = self._run_tool("wire_sync_binaries.py", args)
         if rc != 0:
             self.logger.error(f"Binary sync failed: {rc}")
             return 1
@@ -290,14 +295,7 @@ class UpgradeOrchestrator:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
             args.append("--dry-run")
-        if self.is_local:
-            rc = self.run_module(wire_sync_images.main, args)
-        else:
-            tool_path = self.tools_dir / "wire_sync_images.py"
-            rc, out, err = self.run_tool(tool_path, args)
-            console.print(out)
-            if err:
-                console.print(err, style="red")
+        rc = self._run_tool("wire_sync_images.py", args)
 
         self.logger.success("Sync step completed")
         return 0
@@ -318,19 +316,12 @@ class UpgradeOrchestrator:
         if verbose:
             args.append("--verbose")
         args.extend(["--assethost", assethost, "--ssh-user", ssh_user])
-        for tar in (tars or ["all"]):
+        for tar in (tars or []):
             args.extend(["--tars", tar])
         for group in (groups or ["all"]):
             args.extend(["--groups", group])
 
-        if self.is_local:
-            rc = self.run_module(wire_sync_binaries.main, args)
-        else:
-            tool_path = self.tools_dir / "wire_sync_binaries.py"
-            rc, out, err = self.run_tool(tool_path, args)
-            console.print(out)
-            if err:
-                console.print(err, style="red")
+        rc = self._run_tool("wire_sync_binaries.py", args)
         if rc != 0:
             self.logger.error(f"Binary sync failed: {rc}")
             return rc
@@ -350,20 +341,44 @@ class UpgradeOrchestrator:
             args.extend(["--kubeconfig", self.config.kubeconfig])
         if self.config.dry_run:
             args.append("--dry-run")
-        if self.is_local:
-            rc = self.run_module(wire_sync_images.main, args)
-        else:
-            tool_path = self.tools_dir / "wire_sync_images.py"
-            rc, out, err = self.run_tool(tool_path, args)
-            console.print(out)
-            if err:
-                console.print(err, style="red")
+        rc = self._run_tool("wire_sync_images.py", args)
         if rc != 0:
             self.logger.warn(f"Image sync returned: {rc}")
             return rc
 
         self.logger.success("Images sync completed")
         return 0
+
+    def cmd_sync_chart_images(
+        self,
+        chart_name: str = "wire-server",
+        namespace: str = "default",
+        ssh_user: Optional[str] = None,
+        tars: Optional[List[str]] = None,
+        dry_run: bool = False,
+        verbose: bool = False,
+    ) -> int:
+        from wire_upgrade import wire_sync_chart_images
+        console.print(Panel.fit(Text("SYNC CHART IMAGES"), style="bold green"))
+
+        args = [
+            "--chart",     chart_name,
+            "--release",   chart_name,
+            "--namespace", namespace,
+            "--ssh-user",  ssh_user or self.config.ssh_user or "demo",
+            "--inventory", str(self.new_inventory),
+            "--bundle",    str(self.new_bundle),
+            "--tars",      *(tars or ["containers-helm"]),
+        ]
+        if dry_run or self.config.dry_run:
+            args.append("--dry-run")
+        if verbose:
+            args.append("--verbose")
+        return wire_sync_chart_images.main(args)
+
+    def _run_cassandra_backup(self, args: list[str]) -> int:
+        """Call cassandra_backup.main() directly — no bundle environment needed."""
+        return cassandra_backup.main(args)
 
     def cmd_backup(
         self,
@@ -374,11 +389,15 @@ class UpgradeOrchestrator:
         archive_snapshots: bool = False,
         archive_dir: Optional[str] = None,
         yes: bool = False,
+        verify: bool = False,
+        clear_snapshots: bool = False,
     ) -> int:
         console.print(Panel.fit(Text("CASSANDRA BACKUP"), style="bold green"))
 
-        if not self.validate_bundles():
-            return 1
+        # Cassandra backup only needs SSH to nodes — no bundle environment required.
+        # Skip validate_bundles() to avoid sourcing offline-env.sh and d-check overhead.
+
+        dry_run = self.config.dry_run
 
         if restore:
             if not snapshot_name:
@@ -387,38 +406,47 @@ class UpgradeOrchestrator:
             restore_keyspaces = keyspaces or "brig,galley,gundeck,spar"
             args = [
                 "--restore",
-                "--yes" if yes else "",
-                "--snapshot-name",
-                snapshot_name,
-                "--keyspaces",
-                restore_keyspaces,
-                "--inventory",
-                str(self.new_inventory),
+                "--snapshot-name", snapshot_name,
+                "--keyspaces", restore_keyspaces,
+                "--inventory", str(self.new_inventory),
             ]
-            args = [arg for arg in args if arg]
-            if self.is_local:
-                rc = self.run_module(cassandra_backup.main, args)
-            else:
-                tool_path = self.tools_dir / "cassandra_backup.py"
-                rc, out, err = self.run_tool(tool_path, args)
-                console.print(out)
-                if err:
-                    console.print(err, style="red")
-            return 0 if rc == 0 else 1
+            if yes:
+                args.append("--yes")
+            if dry_run:
+                args.append("--dry-run")
+            return self._run_cassandra_backup(args)
 
         if list_snapshots:
             args = ["--list-snapshots", "--inventory", str(self.new_inventory)]
             if snapshot_name:
                 args.extend(["--snapshot-name", snapshot_name])
-            if self.is_local:
-                rc = self.run_module(cassandra_backup.main, args)
-            else:
-                tool_path = self.tools_dir / "cassandra_backup.py"
-                rc, out, err = self.run_tool(tool_path, args)
-                console.print(out)
-                if err:
-                    console.print(err, style="red")
-            return 0 if rc == 0 else 1
+            return self._run_cassandra_backup(args)
+
+        if clear_snapshots:
+            if not snapshot_name:
+                self.logger.error("--snapshot-name is required for --clear-snapshots")
+                return 1
+            args = [
+                "--clear-snapshots",
+                "--snapshot-name", snapshot_name,
+                "--keyspaces", keyspaces or "brig,galley,gundeck,spar",
+                "--inventory", str(self.new_inventory),
+            ]
+            if yes:
+                args.append("--yes")
+            return self._run_cassandra_backup(args)
+
+        if verify:
+            if not snapshot_name:
+                self.logger.error("--snapshot-name is required for --verify")
+                return 1
+            args = [
+                "--verify",
+                "--snapshot-name", snapshot_name,
+                "--keyspaces", keyspaces or "brig,galley,gundeck,spar",
+                "--inventory", str(self.new_inventory),
+            ]
+            return self._run_cassandra_backup(args)
 
         if archive_snapshots:
             if not snapshot_name:
@@ -427,45 +455,28 @@ class UpgradeOrchestrator:
             archive_keyspaces = keyspaces or "brig,galley,gundeck,spar"
             args = [
                 "--archive-snapshots",
-                "--snapshot-name",
-                snapshot_name,
-                "--keyspaces",
-                archive_keyspaces,
-                "--inventory",
-                str(self.new_inventory),
+                "--snapshot-name", snapshot_name,
+                "--keyspaces", archive_keyspaces,
+                "--inventory", str(self.new_inventory),
             ]
             if archive_dir:
                 args.extend(["--archive-dir", archive_dir])
-            if self.is_local:
-                rc = self.run_module(cassandra_backup.main, args)
-            else:
-                tool_path = self.tools_dir / "cassandra_backup.py"
-                rc, out, err = self.run_tool(tool_path, args)
-                console.print(out)
-                if err:
-                    console.print(err, style="red")
-            return 0 if rc == 0 else 1
+            if dry_run:
+                args.append("--dry-run")
+            return self._run_cassandra_backup(args)
 
         self.snapshot_name = snapshot_name or cassandra_backup.generate_snapshot_name()
         self.logger.info(f"Creating snapshot: {self.snapshot_name}")
 
         backup_keyspaces = keyspaces or "brig,galley,gundeck,spar"
         args = [
-            "--snapshot-name",
-            self.snapshot_name,
-            "--keyspaces",
-            backup_keyspaces,
-            "--inventory",
-            str(self.new_inventory),
+            "--snapshot-name", self.snapshot_name,
+            "--keyspaces", backup_keyspaces,
+            "--inventory", str(self.new_inventory),
         ]
-        if self.is_local:
-            rc = self.run_module(cassandra_backup.main, args)
-        else:
-            tool_path = self.tools_dir / "cassandra_backup.py"
-            rc, out, err = self.run_tool(tool_path, args)
-            console.print(out)
-            if err:
-                console.print(err, style="red")
+        if dry_run:
+            args.append("--dry-run")
+        rc = self._run_cassandra_backup(args)
 
         if rc == 0:
             self.logger.success(f"Snapshot created: {self.snapshot_name}")
@@ -970,6 +981,12 @@ def main(
         raise typer.Exit(code=1)
 
     logger = Logger(cfg.log_dir, console=console)
+
+    # Inform the user when kubeconfig was auto-detected (not explicitly configured)
+    explicit_kubeconfig = kubeconfig or load_config(config).get("kubeconfig")
+    if cfg.kubeconfig and not explicit_kubeconfig:
+        logger.info(f"Auto-detected kubeconfig from old bundle: {cfg.kubeconfig}")
+
     ctx.obj = {"config": cfg, "logger": logger}
 
 
