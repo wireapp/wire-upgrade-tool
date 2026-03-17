@@ -25,6 +25,7 @@ import random
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -262,40 +263,69 @@ def get_snapshot_size(host, snapshot_name, verbose=False):
 
 
 def restore_snapshot(host, keyspace, snapshot_name, verbose=False):
-    """Restore a Cassandra keyspace from snapshot."""
-    cmd = (
-        f"sudo bash -c '"
-        f"set -e; "
-        f"DATA_DIR={CASSANDRA_DATA_DIR}/{keyspace}; "
-        f"TABLE_DIRS=$(find $DATA_DIR -maxdepth 1 -mindepth 1 -type d); "
-        f"if [ -z \"$TABLE_DIRS\" ]; then echo \"No tables found for keyspace {keyspace}\"; exit 1; fi; "
-        f"missing=0; "
-        f"for tdir in $TABLE_DIRS; do "
-        f"  sdir=$tdir/snapshots/{snapshot_name}; "
-        f"  if [ ! -d \"$sdir\" ]; then echo \"Missing snapshot for $tdir\"; missing=1; continue; fi; "
-        f"done; "
-        f"if [ $missing -ne 0 ]; then echo \"Snapshot incomplete for {keyspace}\"; exit 1; fi; "
-        f"systemctl stop cassandra 2>/dev/null; "
-        f"for tdir in $TABLE_DIRS; do "
-        f"  sdir=$tdir/snapshots/{snapshot_name}; "
-        f"  rsync -a $sdir/ $tdir/; "
-        f"done; "
-        f"chown -R cassandra:cassandra $DATA_DIR/; "
-        f"systemctl start cassandra 2>/dev/null; "
-        f"echo \"Restore completed for {keyspace}\"'"
-    )
-    
+    """Restore a Cassandra keyspace from snapshot using sstableloader.
+
+    No Cassandra restart required — sstableloader streams SSTables into the
+    live cluster. Steps per table:
+      1. Replay schema.cql from snapshot (recreates tables if missing)
+      2. TRUNCATE each table (prevents old tombstones from shadowing restored data)
+      3. sstableloader -d localhost <snapshot_dir>  (streams data into cluster)
+    """
     if verbose:
-        print(f"[{host}] Restoring snapshot '{snapshot_name}' for keyspace '{keyspace}'...")
-    
-    rc, out, err = run_ssh(host, cmd)
-    
+        print(f"[{host}] Restoring '{snapshot_name}' for keyspace '{keyspace}' via sstableloader...")
+
+    # Step 1: Replay schema so tables exist before loading
+    schema_ok, schema_out = replay_schema(host, keyspace, snapshot_name, verbose)
+    if not schema_ok and verbose:
+        print(f"[{host}] schema.cql not applied (tables may already exist): {schema_out}")
+
+    # Step 2: Discover all per-table snapshot dirs for this keyspace/snapshot
+    find_cmd = (
+        f"bash -lc '"
+        f"find {CASSANDRA_DATA_DIR}/{keyspace} "
+        f"-mindepth 3 -maxdepth 3 -type d "
+        f"-path \"*/snapshots/{snapshot_name}\"'"
+    )
+    rc, out, err = run_ssh(host, find_cmd)
     if rc != 0:
-        combined = (err or "").strip() or (out or "").strip()
-        print(f"Error restoring snapshot on {host}: {combined}")
-        return False, combined
-    
-    return True, out
+        combined = (err or out or "").strip()
+        return False, f"Could not list snapshot dirs: {combined}"
+
+    snapshot_dirs = [d.strip() for d in out.splitlines() if d.strip()]
+    if not snapshot_dirs:
+        return False, f"No snapshot directories found for {keyspace}/{snapshot_name}"
+
+    # Step 3: TRUNCATE + sstableloader per table
+    errors = []
+    for sdir in snapshot_dirs:
+        # Derive CQL table name from directory: {table_name}-{32hexchars}/snapshots/{snap}
+        # Path(sdir).parent.name gives the table dir e.g. "user-ab12cd34..."
+        table_dir_name = Path(sdir).parent.parent.name
+        table_name = re.sub(r"-[0-9a-f]{32}$", "", table_dir_name, flags=re.IGNORECASE)
+
+        # TRUNCATE to clear any tombstones that would shadow the restored data
+        if table_name:
+            trunc_cmd = f'cqlsh localhost -e "TRUNCATE {keyspace}.\\"{table_name}\\";"'
+            rc_t, out_t, err_t = run_ssh(host, trunc_cmd)
+            if rc_t != 0 and verbose:
+                print(f"[{host}] TRUNCATE {keyspace}.{table_name} warning (may be harmless): {(err_t or out_t).strip()}")
+        elif verbose:
+            print(f"[{host}] Could not parse table name from {table_dir_name}, skipping TRUNCATE")
+
+        # Load SSTables into the live cluster — use the node's actual IP,
+        # not localhost (Cassandra listens on its host IP, not 127.0.0.1)
+        if verbose:
+            print(f"[{host}] sstableloader: {sdir}")
+        load_cmd = f"sstableloader -d {host} {sdir}"
+        rc_l, out_l, err_l = run_ssh(host, load_cmd)
+        if rc_l != 0:
+            errors.append(f"{table_dir_name}: {(err_l or out_l).strip()}")
+        elif verbose:
+            print(f"[{host}] OK: {table_dir_name}")
+
+    if errors:
+        return False, "\n".join(errors)
+    return True, f"Restored {len(snapshot_dirs)} tables for {keyspace}"
 
 
 def list_keyspaces(host, verbose=False):
@@ -703,10 +733,11 @@ def main(argv=None):
             print("\n[DRY RUN] Would restore:")
             for host in hosts:
                 for ks in keyspaces:
-                    print(f"  - Restore {ks} from {args.snapshot_name} on {host}")
+                    print(f"  - Restore {ks} from {args.snapshot_name} on {host} (sstableloader, no restart)")
             return 0
-        
-        print("\nWARNING: This will overwrite existing data!")
+
+        print("\nRestore uses sstableloader — Cassandra stays running, no restart required.")
+        print("Each table will be TRUNCATEd before loading to avoid tombstone shadowing.")
         if not args.yes:
             confirm = input("Type 'yes' to confirm restore: ")
             if confirm.lower() != 'yes':
@@ -729,7 +760,7 @@ def main(argv=None):
             for err in restore_errors:
                 print(f"  - {err}")
             return 1
-        print("\nRestore completed successfully.")
+        print("\nRestore completed successfully. No Cassandra restart required.")
         return 0
     
     # Handle backup

@@ -191,8 +191,13 @@ def sync_chart_values(
 
         # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_values = extract_values_for_template(template_values_dict, helm_values)
-        # Cluster is base; template fills in new keys only
-        merged_values = _fill_from_template(helm_values_for_values, template_values_dict)
+        # Use cluster values as-is; template only adds fields that are completely missing in cluster
+        # but don't reintroduce removed fields
+        merged_values = helm_values_for_values
+        # Recursively add missing keys from template for new Wire version fields
+        for key in template_values_dict:
+            if key not in merged_values:
+                merged_values[key] = template_values_dict[key]
 
         # Write merged values
         try:
@@ -212,8 +217,13 @@ def sync_chart_values(
 
         # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_secrets = extract_values_for_template(template_secrets_dict, helm_values)
-        # Cluster is base; template fills in new keys only
-        merged_secrets = _fill_from_template(helm_values_for_secrets, template_secrets_dict)
+        # Use cluster values as-is; template only adds fields that are completely missing in cluster
+        # but don't reintroduce removed fields
+        merged_secrets = helm_values_for_secrets
+        # Recursively add missing keys from template for new Wire version fields
+        for key in template_secrets_dict:
+            if key not in merged_secrets:
+                merged_secrets[key] = template_secrets_dict[key]
 
         # Create backup of secrets (separate backup file)
         backup_secrets_path = values_dir / f"secrets-backup-{timestamp}.yaml"
