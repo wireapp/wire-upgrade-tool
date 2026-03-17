@@ -118,11 +118,11 @@ def sync_chart_values(
     - values/{chart_name}/secrets-backup-TIMESTAMP.yaml (auto-backup of helm secrets)
 
     The merge strategy:
-    - Live cluster values are the base (source of truth)
-    - Template only adds keys that are missing in cluster values
-    - Existing cluster values are never overwritten
-    - New fields introduced in the new Wire version get template defaults
-    - Values/secrets split is preserved via extract_values_for_template
+    - Live cluster values are the source of truth and always preserved
+    - Values/secrets split is preserved via extract_values_for_template (filters by template structure)
+    - Template only adds keys that are missing in cluster values (provides defaults for new fields)
+    - If a field was removed from the cluster, it is NOT re-added from the template
+    - If a field exists in both, the cluster value always wins (template is overridden)
 
     Args:
         new_bundle: Path to new bundle directory.
@@ -191,13 +191,9 @@ def sync_chart_values(
 
         # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_values = extract_values_for_template(template_values_dict, helm_values)
-        # Use cluster values as-is; template only adds fields that are completely missing in cluster
-        # but don't reintroduce removed fields
-        merged_values = helm_values_for_values
-        # Recursively add missing keys from template for new Wire version fields
-        for key in template_values_dict:
-            if key not in merged_values:
-                merged_values[key] = template_values_dict[key]
+        # Merge: cluster values (from helm) win; template only adds fields that are completely missing
+        # This ensures all current cluster values are preserved and not re-introduced by template
+        merged_values = _fill_from_template(helm_values_for_values, template_values_dict)
 
         # Write merged values
         try:
@@ -217,13 +213,9 @@ def sync_chart_values(
 
         # Extract helm values matching the template structure (preserves values/secrets split)
         helm_values_for_secrets = extract_values_for_template(template_secrets_dict, helm_values)
-        # Use cluster values as-is; template only adds fields that are completely missing in cluster
-        # but don't reintroduce removed fields
-        merged_secrets = helm_values_for_secrets
-        # Recursively add missing keys from template for new Wire version fields
-        for key in template_secrets_dict:
-            if key not in merged_secrets:
-                merged_secrets[key] = template_secrets_dict[key]
+        # Merge: cluster values (from helm) win; template only adds fields that are completely missing
+        # This ensures all current cluster values are preserved and not re-introduced by template
+        merged_secrets = _fill_from_template(helm_values_for_secrets, template_secrets_dict)
 
         # Create backup of secrets (separate backup file)
         backup_secrets_path = values_dir / f"secrets-backup-{timestamp}.yaml"
