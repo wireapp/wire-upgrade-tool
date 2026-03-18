@@ -72,6 +72,31 @@ def _fill_from_template(cluster: dict, template: dict) -> dict:
     return result
 
 
+def _subtract_template_keys(source: dict, template: dict) -> dict:
+    """Remove from source all keys defined in template (recursively).
+
+    Used to strip secrets-shaped keys from the full cluster values so
+    values.yaml contains only non-secret config.
+
+    Args:
+        source: Full cluster values.
+        template: Secrets template — defines which keys to remove.
+
+    Returns:
+        Copy of source with all template-defined keys removed.
+    """
+    result = {}
+    for key, value in source.items():
+        if key not in template:
+            result[key] = value
+        elif isinstance(value, dict) and isinstance(template[key], dict):
+            sub = _subtract_template_keys(value, template[key])
+            if sub:
+                result[key] = sub
+        # else: leaf key exists in secrets template → belongs in secrets.yaml, skip
+    return result
+
+
 def extract_values_for_template(template: dict, source: dict) -> dict:
     """Extract values from source matching the template structure exactly.
 
@@ -180,7 +205,11 @@ def sync_chart_values(
     except Exception as exc:
         logger.warn(f"Failed to create backup {backup_path}: {exc}")
 
-    # Handle prod-values.example.yaml if it exists
+    # Load both templates upfront so the secrets template is available
+    # when computing what to strip from values.yaml
+    template_values_dict = {}
+    template_secrets_dict = {}
+
     if has_values_template:
         try:
             template_values_dict = yaml.safe_load(template_values_path.read_text()) or {}
@@ -188,19 +217,6 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_values_path}: {exc}")
             return False
 
-        # Cluster is the source of truth; template only adds keys absent in cluster.
-        # Do NOT pre-filter helm_values — that would drop cluster keys not in the template.
-        merged_values = _fill_from_template(helm_values, template_values_dict)
-
-        # Write merged values
-        try:
-            dest_values.write_text(_yaml_dump(merged_values))
-            logger.info(f"Generated {dest_values}")
-        except Exception as exc:
-            logger.error(f"Failed to write {dest_values}: {exc}")
-            return False
-
-    # Handle prod-secrets.example.yaml if it exists
     if has_secrets_template:
         try:
             template_secrets_dict = yaml.safe_load(template_secrets_path.read_text()) or {}
@@ -208,11 +224,25 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_secrets_path}: {exc}")
             return False
 
-        # Cluster is the source of truth; template only adds keys absent in cluster.
-        # Do NOT pre-filter helm_values — that would drop cluster keys not in the template.
-        merged_secrets = _fill_from_template(helm_values, template_secrets_dict)
+    # Generate values.yaml:
+    # - Strip secrets-shaped keys from cluster values (those belong in secrets.yaml)
+    # - Fill in any new keys from the values template
+    if has_values_template:
+        helm_for_values = _subtract_template_keys(helm_values, template_secrets_dict)
+        merged_values = _fill_from_template(helm_for_values, template_values_dict)
+        try:
+            dest_values.write_text(_yaml_dump(merged_values))
+            logger.info(f"Generated {dest_values}")
+        except Exception as exc:
+            logger.error(f"Failed to write {dest_values}: {exc}")
+            return False
 
-        # Write merged secrets
+    # Generate secrets.yaml:
+    # - Extract only secrets-shaped keys from cluster values
+    # - Fill in any new secret keys from the secrets template
+    if has_secrets_template:
+        helm_for_secrets = extract_values_for_template(template_secrets_dict, helm_values)
+        merged_secrets = _fill_from_template(helm_for_secrets, template_secrets_dict)
         try:
             dest_secrets.write_text(_yaml_dump(merged_secrets))
             logger.info(f"Generated {dest_secrets}")

@@ -239,19 +239,19 @@ def build_offline_cmd(
     outside the bundle dir (not mounted) it is silently ignored for d commands.
     """
     parts = [f"cd {shlex.quote(bundle_dir)}", f"source {offline_env}"]
+    mount_point = Path(bundle_dir).name
     if use_d:
-        if kubeconfig:
-            bundle_prefix = bundle_dir.rstrip("/") + "/"
-            if kubeconfig.startswith(bundle_prefix):
-                rel = kubeconfig[len(bundle_prefix):]
-                mount_point = Path(bundle_dir).name
-                container_kube = f"/{mount_point}/{rel}"
-                inner = f"KUBECONFIG={shlex.quote(container_kube)} {cmd}"
-                run_part = f"d bash -c {shlex.quote(inner)}"
-            else:
-                run_part = f"d {cmd}"
+        # Always cd into /$MOUNT_POINT inside the container so that relative
+        # paths (e.g. charts/wire-server, values/...) resolve correctly.
+        # Without this, helm treats "charts/wire-server" as <repo>/<chart>.
+        bundle_prefix = bundle_dir.rstrip("/") + "/"
+        if kubeconfig and kubeconfig.startswith(bundle_prefix):
+            rel = kubeconfig[len(bundle_prefix):]
+            container_kube = f"/{mount_point}/{rel}"
+            inner = f"cd /{mount_point} && KUBECONFIG={shlex.quote(container_kube)} {cmd}"
         else:
-            run_part = f"d {cmd}"
+            inner = f"cd /{mount_point} && {cmd}"
+        run_part = f"d bash -c {shlex.quote(inner)}"
     else:
         run_part = ""
         if kubeconfig:
