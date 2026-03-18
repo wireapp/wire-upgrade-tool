@@ -118,11 +118,10 @@ def sync_chart_values(
     - values/{chart_name}/secrets-backup-TIMESTAMP.yaml (auto-backup of helm secrets)
 
     The merge strategy:
-    - Live cluster values are the source of truth and always preserved
-    - Values/secrets split is preserved via extract_values_for_template (filters by template structure)
-    - Template only adds keys that are missing in cluster values (provides defaults for new fields)
-    - If a field was removed from the cluster, it is NOT re-added from the template
-    - If a field exists in both, the cluster value always wins (template is overridden)
+    - Live cluster values are the source of truth — all keys are preserved as-is
+    - Template only adds keys that are completely absent in the cluster values
+    - If a field exists in both, the cluster value always wins
+    - New fields introduced in the new Wire version get their template defaults
 
     Args:
         new_bundle: Path to new bundle directory.
@@ -173,13 +172,13 @@ def sync_chart_values(
         logger.error(f"Failed to parse helm values: {exc}")
         return False
 
-    # Create backup of all helm values
-    backup_values_path = values_dir / f"values-backup-{timestamp}.yaml"
+    # Backup raw cluster values (single source-of-truth snapshot before any merge)
+    backup_path = values_dir / f"helm-values-backup-{timestamp}.yaml"
     try:
-        backup_values_path.write_text(_yaml_dump(helm_values))
-        logger.info(f"Created backup: {backup_values_path}")
+        backup_path.write_text(_yaml_dump(helm_values))
+        logger.info(f"Cluster snapshot backed up: {backup_path}")
     except Exception as exc:
-        logger.warn(f"Failed to create backup {backup_values_path}: {exc}")
+        logger.warn(f"Failed to create backup {backup_path}: {exc}")
 
     # Handle prod-values.example.yaml if it exists
     if has_values_template:
@@ -189,11 +188,9 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_values_path}: {exc}")
             return False
 
-        # Extract helm values matching the template structure (preserves values/secrets split)
-        helm_values_for_values = extract_values_for_template(template_values_dict, helm_values)
-        # Merge: cluster values (from helm) win; template only adds fields that are completely missing
-        # This ensures all current cluster values are preserved and not re-introduced by template
-        merged_values = _fill_from_template(helm_values_for_values, template_values_dict)
+        # Cluster is the source of truth; template only adds keys absent in cluster.
+        # Do NOT pre-filter helm_values — that would drop cluster keys not in the template.
+        merged_values = _fill_from_template(helm_values, template_values_dict)
 
         # Write merged values
         try:
@@ -211,19 +208,9 @@ def sync_chart_values(
             logger.error(f"Failed to parse template {template_secrets_path}: {exc}")
             return False
 
-        # Extract helm values matching the template structure (preserves values/secrets split)
-        helm_values_for_secrets = extract_values_for_template(template_secrets_dict, helm_values)
-        # Merge: cluster values (from helm) win; template only adds fields that are completely missing
-        # This ensures all current cluster values are preserved and not re-introduced by template
-        merged_secrets = _fill_from_template(helm_values_for_secrets, template_secrets_dict)
-
-        # Create backup of secrets (separate backup file)
-        backup_secrets_path = values_dir / f"secrets-backup-{timestamp}.yaml"
-        try:
-            backup_secrets_path.write_text(_yaml_dump(merged_secrets))
-            logger.info(f"Created backup: {backup_secrets_path}")
-        except Exception as exc:
-            logger.warn(f"Failed to create backup {backup_secrets_path}: {exc}")
+        # Cluster is the source of truth; template only adds keys absent in cluster.
+        # Do NOT pre-filter helm_values — that would drop cluster keys not in the template.
+        merged_secrets = _fill_from_template(helm_values, template_secrets_dict)
 
         # Write merged secrets
         try:
