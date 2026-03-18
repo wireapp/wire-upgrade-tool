@@ -1,22 +1,74 @@
 # Wire Upgrade CLI
 
-Command-line tool for performing Wire Server upgrade actions. It wraps
-helm/kubectl calls and helper scripts packaged with the project.
+Command-line tool for performing Wire Server upgrade actions on **Kubespray-based
+on-premises deployments**. It wraps helm/kubectl calls and helper scripts
+packaged with the Wire Server bundle.
+
+## Scope
+
+This tool is designed for Wire Server deployments that:
+
+- Are running on-premises on bare-metal or VMs managed by **Kubespray**
+- Were originally deployed using a bundle built from the
+  [wire-server-deploy](https://github.com/wireapp/wire-server-deploy) repository
+- Have an existing running system with the old `wire-server-deploy` bundle
+  present on the admin host
+
+### Prerequisites
+
+Before using this tool:
+
+1. An existing Wire Server deployment must be running (the **old bundle** at
+   e.g. `/home/demo/wire-server-deploy`)
+2. The **new bundle** (built from `wire-server-deploy`) must be copied to the
+   admin host (e.g. `/home/demo/new`)
+3. `wire-upgrade` must be installed on the admin host (see [Installation](#installation))
+4. `upgrade-config.json` must be created pointing to both bundles
+   (`wire-upgrade init-config`)
+5. Run `wire-upgrade setup-kubeconfig` once to copy the kubeconfig from the
+   old bundle into the new bundle
 
 ---
 
 ## Installation
 
-Build a wheel and install it into the Python environment you intend to use:
+### From GitHub Releases (recommended)
+
+Install the latest release directly on the admin host:
+
+```sh
+pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+```
+
+### Updating
+
+Re-run the same install command with `--upgrade`:
+
+```sh
+pip install --upgrade https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+```
+
+### On an admin host without internet access
+
+Download the wheel on a machine with internet access, copy it to the admin
+host, then install:
+
+```sh
+# machine with internet access
+curl -LO https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+scp wire_upgrade-0.1.1-py3-none-any.whl <admin-host>:/tmp/
+
+# on the admin host
+pip install --force-reinstall /tmp/wire_upgrade-0.1.1-py3-none-any.whl
+```
+
+### From source (development)
 
 ```sh
 cd /path/to/wire-upgrade-tool
-python3 -m build               # produces dist/wire_upgrade-*.whl
+python3 -m build
 pip install --force-reinstall dist/wire_upgrade-*.whl
 ```
-
-You can `scp` the wheel to another host and install it there with
-`pip install /path/to/wheel` (use `--user` as appropriate).
 
 The wheel bundles all Python modules and declares the runtime dependencies
 (`typer`, `rich`, `pydantic`, `PyYAML`), so nothing else is required.
@@ -249,6 +301,24 @@ Generate and validate the Ansible inventory for the new bundle.
 wire-upgrade inventory-sync      # copy and adapt hosts.ini from old bundle
 wire-upgrade inventory-validate  # check required groups and variables
 ```
+
+### setup-kubeconfig
+Copy `admin.conf` from the old bundle (created by kubespray) into the new
+bundle and update `bin/offline-env.sh` to pass `KUBECONFIG` into the docker
+container. Must be run once after a new bundle is placed on the admin host.
+
+```sh
+wire-upgrade setup-kubeconfig
+```
+
+This copies `ansible/inventory/offline/artifacts/admin.conf` from the old
+bundle to the same path in the new bundle, backs up the existing
+`bin/offline-env.sh`, and writes a new one that sets
+`-e KUBECONFIG=/$MOUNT_POINT/ansible/inventory/offline/artifacts/admin.conf`
+inside the `d()` docker function.
+
+After running this, `kubeconfig` is auto-detected from the new bundle — no
+need to set it explicitly in `upgrade-config.json`.
 
 ### assets-compare
 Compare asset indices between the bundle and a remote assethost.
