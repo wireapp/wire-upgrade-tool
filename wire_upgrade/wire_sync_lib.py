@@ -244,7 +244,8 @@ def build_offline_cmd(
             bundle_prefix = bundle_dir.rstrip("/") + "/"
             if kubeconfig.startswith(bundle_prefix):
                 rel = kubeconfig[len(bundle_prefix):]
-                container_kube = f"/wire-server-deploy/{rel}"
+                mount_point = Path(bundle_dir).name
+                container_kube = f"/{mount_point}/{rel}"
                 inner = f"KUBECONFIG={shlex.quote(container_kube)} {cmd}"
                 run_part = f"d bash -c {shlex.quote(inner)}"
             else:

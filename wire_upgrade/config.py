@@ -7,7 +7,6 @@ import difflib
 import json
 import os
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -227,25 +226,20 @@ def resolve_config(
         "snapshot_name": snapshot_name or data.get("snapshot_name"),
     }
 
-    # Auto-detect kubeconfig from old_bundle when not explicitly set
+    # Auto-detect kubeconfig when not explicitly set.
+    # Priority: new bundle canonical location > old bundle root search.
+    if not merged["kubeconfig"]:
+        if merged.get("new_bundle"):
+            canonical = Path(merged["new_bundle"]) / "ansible" / "inventory" / "offline" / "artifacts" / "admin.conf"
+            if canonical.is_file() and _is_kubeconfig(canonical):
+                merged["kubeconfig"] = str(canonical)
+
     if not merged["kubeconfig"] and merged.get("old_bundle"):
         old_bundle_path = Path(merged["old_bundle"])
         if old_bundle_path.is_dir():
             found = find_kubeconfig_in_bundle(old_bundle_path)
             if found:
-                # Copy into new_bundle so all operations use a consistent path
-                if merged.get("new_bundle"):
-                    new_bundle_path = Path(merged["new_bundle"])
-                    dest = new_bundle_path / "kubeconfig"
-                    try:
-                        new_bundle_path.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(found, dest)
-                        merged["kubeconfig"] = str(dest)
-                    except Exception:
-                        # Fall back to the original path if the copy fails
-                        merged["kubeconfig"] = str(found)
-                else:
-                    merged["kubeconfig"] = str(found)
+                merged["kubeconfig"] = str(found)
 
     try:
         return Config(**merged)

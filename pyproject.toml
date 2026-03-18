@@ -1,6 +1,6 @@
 [project]
 name = "wire-upgrade"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Wire Upgrade CLI"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,8 +14,12 @@ dependencies = [
 wire-upgrade = "wire_upgrade.orchestrator:app"
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# version is derived from git tags (e.g. v0.2.0 → 0.2.0)
+# between tags it produces 0.2.0.dev3+gabcdef
 
 [tool.setuptools.packages.find]
 where = ["."]

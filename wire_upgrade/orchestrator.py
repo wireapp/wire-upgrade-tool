@@ -30,6 +30,7 @@ from wire_upgrade import assets_compare
 from wire_upgrade import chart_operations
 from wire_upgrade import chart_install
 from wire_upgrade import values_sync
+from wire_upgrade import kubeconfig_setup
 from wire_upgrade.commands import register_commands
 from wire_upgrade.config import Config, Logger, LOG_DIR, load_config, diff_uncommented, resolve_config
 
@@ -873,6 +874,11 @@ class UpgradeOrchestrator:
             return 1
         self.logger.success("Inventory validation passed")
         return 0
+
+    def cmd_setup_kubeconfig(self) -> int:
+        console.print(Panel.fit(Text("SETUP KUBECONFIG"), style="bold green"))
+        ok = kubeconfig_setup.setup_kubeconfig(self.new_bundle, self.old_bundle, self.logger)
+        return 0 if ok else 1
 
     def cmd_assets_compare(self, assethost: Optional[str] = None, ssh_user: Optional[str] = None) -> int:
         console.print(Panel.fit(Text("ASSET INDEX COMPARISON"), style="bold green"))

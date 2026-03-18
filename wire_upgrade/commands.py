@@ -242,6 +242,11 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     def inventory_validate(ctx: typer.Context):
         _run(ctx, "cmd_inventory_validate")
 
+    @app.command("setup-kubeconfig")
+    def setup_kubeconfig(ctx: typer.Context):
+        """Copy admin.conf from old bundle to new bundle and patch offline-env.sh with KUBECONFIG."""
+        _run(ctx, "cmd_setup_kubeconfig")
+
     @app.command("assets-compare")
     def assets_compare_cmd(
         ctx: typer.Context,
