@@ -24,6 +24,19 @@ jobs:
       - name: Build wheel
         run: python -m build --wheel
 
+      - name: Update README install URLs
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          WHL="wire_upgrade-${VERSION}-py3-none-any.whl"
+          BASE="https://github.com/wireapp/wire-upgrade-tool/releases/download/${TAG}"
+          sed -i "s|releases/download/v[0-9][0-9.]*\/wire_upgrade-[0-9][0-9.]*-py3-none-any\.whl|releases/download/${TAG}/${WHL}|g" README.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "docs: update install URLs to ${TAG}"
+          git push origin HEAD:main
+
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

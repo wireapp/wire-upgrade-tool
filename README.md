@@ -37,7 +37,7 @@ Before using this tool:
 Install the latest release directly on the admin host:
 
 ```sh
-pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.2/wire_upgrade-0.1.2-py3-none-any.whl
 ```
 
 ### Updating
@@ -45,7 +45,7 @@ pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.
 Re-run the same install command with `--upgrade`:
 
 ```sh
-pip install --upgrade https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+pip install --upgrade https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.2/wire_upgrade-0.1.2-py3-none-any.whl
 ```
 
 ### On an admin host without internet access
@@ -55,7 +55,7 @@ host, then install:
 
 ```sh
 # machine with internet access
-curl -LO https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.1/wire_upgrade-0.1.1-py3-none-any.whl
+curl -LO https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.2/wire_upgrade-0.1.2-py3-none-any.whl
 scp wire_upgrade-0.1.1-py3-none-any.whl <admin-host>:/tmp/
 
 # on the admin host
@@ -244,16 +244,39 @@ wire-upgrade check-schema
 wire-upgrade check-schema -n prod
 ```
 
+### sync-values
+Fetch live helm values from the cluster and merge them into the bundle templates,
+writing `values.yaml` / `secrets.yaml` in `values/{chart-name}/`.
+
+```sh
+# Sync wire-server (default)
+wire-upgrade sync-values
+
+# Sync a specific chart and release
+wire-upgrade sync-values wire-server -n prod
+wire-upgrade sync-values postgresql-external --release my-postgres -n prod
+```
+
+The merge strategy keeps live cluster values as the source of truth — template
+defaults only fill in keys that are absent from the cluster (e.g. new config
+fields introduced in the new Wire version). For `wire-server` it also syncs the
+PostgreSQL password from the `wire-postgresql-external-secret` k8s secret.
+
+After running, check the generated files then deploy:
+
+```sh
+wire-upgrade sync-values wire-server
+wire-upgrade install-or-upgrade wire-server
+```
+
 ### install-or-upgrade
-Deploy or upgrade a Helm chart.
+Deploy or upgrade a Helm chart. Automatically validates template rendering
+before deploying — if `helm template` fails the deployment is aborted.
 
 ```sh
 # wire-server (default when no chart is given)
 wire-upgrade install-or-upgrade
 wire-upgrade install-or-upgrade wire-server -n prod
-
-# Sync live cluster values into the bundle templates first, then deploy
-wire-upgrade install-or-upgrade wire-server --sync-values
 
 # Custom chart — looks for chart at charts/{name} and values at values/{name}/
 wire-upgrade install-or-upgrade wire-utility
@@ -264,11 +287,14 @@ wire-upgrade install-or-upgrade wire-utility --chart charts/wire-utility \
     --values /home/demo/new/values/wire-server/values.yaml \
     --values /home/demo/new/values/wire-server/secrets.yaml
 
-# Reuse existing release values (skips values file lookup)
+# Reuse existing release values (skips values file lookup, skips pre-validation)
 wire-upgrade install-or-upgrade wire-server --reuse-values
 
 # Dry-run (shows diff + helm --dry-run output, no actual deployment)
 wire-upgrade install-or-upgrade wire-server --dry-run
+
+# Skip helm template pre-validation (escape hatch)
+wire-upgrade install-or-upgrade wire-server --skip-validate
 ```
 
 **Values auto-discovery:** for each chart, the tool looks for values files under
@@ -276,13 +302,10 @@ wire-upgrade install-or-upgrade wire-server --dry-run
 over `prod-values.example.yaml` / `prod-secrets.example.yaml`). Pass `--values`
 explicitly to override.
 
-**`--sync-values`:** fetches live helm values from the cluster and merges them
-with the new bundle templates, writing `values.yaml` / `secrets.yaml`. The
-merge strategy keeps live cluster values as the source of truth — template
-defaults only fill in keys that are absent from the cluster (e.g. new config
-fields introduced in the new Wire version). For `wire-server` it also syncs the
-PostgreSQL password from the cluster secret. This flag syncs only — it does not
-deploy. Run `install-or-upgrade` again without the flag to deploy.
+**Pre-flight validation:** before every deployment, `helm template` is run with
+the same values files to catch rendering errors. Use `--skip-validate` to bypass
+this check if needed. Pre-validation is also skipped when `--reuse-values` is
+set (no values files to validate against).
 
 ### cleanup-containerd / cleanup-containerd-all
 Remove unused container images from containerd on one or all nodes.
@@ -340,9 +363,25 @@ flowchart TD
     E --> F["migrate --cassandra-migrations<br/>run schema migrations"]
     F --> G["check-schema<br/>verify schema versions"]
     G --> H["migrate --migrate-features<br/>run feature flag migrations"]
-    H --> I["install-or-upgrade wire-server<br/>--sync-values first, then deploy"]
-    I --> J["cleanup-containerd<br/>remove old images from nodes"]
+    H --> I["sync-values wire-server<br/>fetch cluster values → bundle templates"]
+    I --> I2["install-or-upgrade wire-server<br/>validates + deploys"]
+    I2 --> J["cleanup-containerd<br/>remove old images from nodes"]
     J --> K([done])
+```
+
+---
+
+### sync-values Flow
+
+```mermaid
+flowchart TD
+    A[sync-values chart] --> B[helm get values\nfrom cluster release]
+    B --> C[deep merge into\nbundle templates]
+    C --> D{chart == wire-server?}
+    D -->|yes| E[kubectl get secret\nwire-postgresql-external-secret]
+    E --> F[set pgPassword in secrets.yaml\nfor services with config.postgresql]
+    F --> G([done — run install-or-upgrade to deploy])
+    D -->|no| G
 ```
 
 ---
@@ -351,28 +390,23 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[install-or-upgrade chart] --> B{--sync-values?}
-
-    B -->|yes| C[helm get values\nfrom cluster release]
-    C --> D[deep merge into\nbundle templates]
-    D --> E{chart == wire-server?}
-    E -->|yes| F[kubectl get secret\nwire-postgresql-external-secret]
-    F --> G[set pgPassword in secrets.yaml\nfor services with config.postgresql]
-    G --> Z([done — run again without\n--sync-values to deploy])
-    E -->|no| Z
-
-    B -->|no| H[auto-discover values files\nvalues/chart-name/]
-    H --> I[show diff\ncurrent cluster vs new values]
-    I --> J[helm upgrade --install\n--timeout 15m --wait]
-    J --> K{success?}
-    K -->|yes| L[kubectl get pods\ncheck pod status]
-    L --> M([done])
-    K -->|no| N([error])
+    A[install-or-upgrade chart] --> B[auto-discover values files\nvalues/chart-name/]
+    B --> C{--skip-validate?}
+    C -->|no| D[helm template\npre-flight validation]
+    D --> E{valid?}
+    E -->|no| ERR([error — fix values])
+    E -->|yes| F[show diff\ncurrent cluster vs new values]
+    C -->|yes| F
+    F --> G[helm upgrade --install\n--timeout 15m --wait]
+    G --> H{success?}
+    H -->|yes| I[kubectl get pods\ncheck pod status]
+    I --> J([done])
+    H -->|no| K([error])
 ```
 
 ---
 
-### Values Sync Detail (--sync-values)
+### Values Sync Detail (sync-values)
 
 ```mermaid
 flowchart LR
