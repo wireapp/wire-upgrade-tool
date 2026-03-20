@@ -72,6 +72,10 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             help="Container tar archives to search: containers-helm, containers-system, or all (repeatable; default: containers-helm)"),
         dry_run: bool = typer.Option(False, "--dry-run", help="Show matched images and target nodes without loading"),
         verbose: bool = typer.Option(False, "--verbose", help="Show ctr output per node"),
+        update_deps: bool = typer.Option(False, "--update-deps",
+            help="Run helm dependency update if remote deps are missing from chart"),
+        pull_upstream: bool = typer.Option(False, "--pull-upstream",
+            help="Pull images not found in bundle tars from upstream registries using docker"),
     ):
         """Sync chart-specific images from bundle tars directly to k8s node containerd."""
         _run(ctx, "cmd_sync_chart_images",
@@ -81,6 +85,8 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             tars=tars or ["containers-helm"],
             dry_run=dry_run,
             verbose=verbose,
+            update_deps=update_deps,
+            pull_upstream=pull_upstream,
         )
 
     @app.command("sync-images")
@@ -170,28 +176,39 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     ):
         _run(ctx, "cmd_check_schema", namespace=namespace)
 
+    @app.command("sync-values")
+    def sync_values_cmd(
+        ctx: typer.Context,
+        chart_name: Optional[str] = typer.Argument(None, help="Chart name (default: wire-server)"),
+        release: Optional[str] = typer.Option(None, "--release", help="Helm release name (defaults to chart name)"),
+        namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    ):
+        """Fetch live helm values from cluster and merge into bundle templates."""
+        _run(ctx, "cmd_sync_values", chart_name=chart_name, release=release, namespace=namespace)
+
     @app.command("install-or-upgrade")
     def install_or_upgrade(
         ctx: typer.Context,
         chart_name: Optional[str] = typer.Argument(None, help="Chart to install: 'wire-server' or path to custom chart"),
-        sync_values: bool = typer.Option(False, "--sync-values",
-            help="Sync live helm values from cluster and merge into templates before installing"),
         chart: Optional[str] = typer.Option(None, "--chart", help="Override chart path (relative to new bundle)"),
         release: Optional[str] = typer.Option(None, "--release", help="Helm release name (defaults to chart name if not provided)"),
         values: Optional[List[str]] = typer.Option(None, "--values", help="Values file (repeatable)"),
+        set_values: Optional[List[str]] = typer.Option(None, "--set", help="Set individual values (repeatable, e.g. --set key=value)"),
         reuse_values: bool = typer.Option(False, "--reuse-values", help="Reuse values from existing release"),
         namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
         dry_run: bool = typer.Option(False, "--dry-run", help="Use Helm dry-run"),
+        skip_validate: bool = typer.Option(False, "--skip-validate", help="Skip helm template pre-validation"),
     ):
         _run(ctx, "cmd_install_or_upgrade",
             chart_name=chart_name,
-            sync_values=sync_values,
             chart=chart,
             release=release,
             values=values,
+            set_values=set_values,
             reuse_values=reuse_values,
             namespace=namespace,
             dry_run=dry_run,
+            skip_validate=skip_validate,
         )
 
     @app.command("cleanup-containerd")
@@ -241,6 +258,22 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
     @app.command("inventory-validate")
     def inventory_validate(ctx: typer.Context):
         _run(ctx, "cmd_inventory_validate")
+
+    @app.command("validate-values")
+    def validate_values(
+        ctx: typer.Context,
+        chart_name: Optional[str] = typer.Argument(None, help="Chart name (default: wire-server)"),
+        chart: Optional[str] = typer.Option(None, "--chart", help="Override chart path (relative to new bundle)"),
+        values: Optional[List[str]] = typer.Option(None, "--values", help="Values file (repeatable)"),
+        namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    ):
+        """Lint values files against a Helm chart and diff against chart defaults."""
+        _run(ctx, "cmd_validate_values",
+            chart_name=chart_name,
+            chart=chart,
+            values=values,
+            namespace=namespace,
+        )
 
     @app.command("setup-kubeconfig")
     def setup_kubeconfig(ctx: typer.Context):

@@ -31,6 +31,7 @@ from wire_upgrade import chart_operations
 from wire_upgrade import chart_install
 from wire_upgrade import values_sync
 from wire_upgrade import kubeconfig_setup
+from wire_upgrade import values_validate
 from wire_upgrade.commands import register_commands
 from wire_upgrade.config import Config, Logger, LOG_DIR, load_config, diff_uncommented, resolve_config
 
@@ -358,6 +359,8 @@ class UpgradeOrchestrator:
         tars: Optional[List[str]] = None,
         dry_run: bool = False,
         verbose: bool = False,
+        update_deps: bool = False,
+        pull_upstream: bool = False,
     ) -> int:
         from wire_upgrade import wire_sync_chart_images
         console.print(Panel.fit(Text("SYNC CHART IMAGES"), style="bold green"))
@@ -375,6 +378,10 @@ class UpgradeOrchestrator:
             args.append("--dry-run")
         if verbose:
             args.append("--verbose")
+        if update_deps:
+            args.append("--update-deps")
+        if pull_upstream:
+            args.append("--pull-upstream")
         return wire_sync_chart_images.main(args)
 
     def _run_cassandra_backup(self, args: list[str]) -> int:
@@ -614,44 +621,56 @@ class UpgradeOrchestrator:
         self.logger.info(f"PostgreSQL password synced for: {', '.join(pg_services)}")
         return True
 
+    def cmd_sync_values(
+        self,
+        chart_name: Optional[str] = None,
+        release: Optional[str] = None,
+        namespace: str = "default",
+    ) -> int:
+        """Fetch live helm values from cluster and merge into bundle templates."""
+        console.print(Panel.fit(Text("SYNC VALUES"), style="bold green"))
+
+        if not self.validate_bundles():
+            return 1
+
+        effective_chart = chart_name or "wire-server"
+        effective_release = release or effective_chart
+
+        if effective_chart == "wire-server":
+            ok = self._sync_wire_server_values(namespace=namespace)
+        else:
+            ok = self._sync_chart_values(effective_chart, effective_release, namespace=namespace)
+
+        if not ok:
+            return 1
+
+        self.logger.success(
+            f"Values synced. Run 'wire-upgrade install-or-upgrade {effective_chart}' to deploy."
+        )
+        return 0
+
     def cmd_install_or_upgrade(
         self,
         chart_name: Optional[str] = None,
-        sync_values: bool = False,
         chart: Optional[str] = None,
         release: Optional[str] = None,
         values: Optional[List[str]] = None,
+        set_values: Optional[List[str]] = None,
         reuse_values: bool = False,
         namespace: str = "default",
         dry_run: bool = False,
+        skip_validate: bool = False,
     ) -> int:
-        """Install or upgrade a Helm chart with values sync support.
+        """Install or upgrade a Helm chart.
 
-        Supports syncing live helm values from cluster for any chart.
+        Automatically validates template rendering before deploying.
+        Use --skip-validate to bypass pre-flight validation.
         """
         console.print(Panel.fit(Text("INSTALL OR UPGRADE"), style="bold green"))
 
         if not self.validate_bundles():
             return 1
 
-        # Handle --sync-values flag: fetch and merge values from cluster
-        if sync_values:
-            # Determine chart name and release for sync
-            sync_chart = chart_name or "wire-server"
-            sync_release = release or sync_chart
-
-            # wire-server has extra post-sync steps (pg password, etc.)
-            if sync_chart == "wire-server":
-                ok = self._sync_wire_server_values(namespace=namespace)
-            else:
-                ok = self._sync_chart_values(sync_chart, sync_release, namespace=namespace)
-
-            if not ok:
-                return 1
-            self.logger.success(f"Values synced successfully. Use 'wire-upgrade install-or-upgrade {sync_chart}' to deploy.")
-            return 0
-
-        # Delegate to chart_install module for installation logic
         return chart_install.install_or_upgrade(
             new_bundle=self.new_bundle,
             logger=self.logger,
@@ -661,9 +680,11 @@ class UpgradeOrchestrator:
             chart=chart,
             release=release,
             values=values,
+            set_values=set_values,
             reuse_values=reuse_values,
             namespace=namespace,
             dry_run=dry_run,
+            skip_validate=skip_validate,
         )
 
     def cmd_check_schema(self, namespace: str = "default") -> int:
@@ -874,6 +895,27 @@ class UpgradeOrchestrator:
             return 1
         self.logger.success("Inventory validation passed")
         return 0
+
+    def cmd_validate_values(
+        self,
+        chart_name: Optional[str] = None,
+        chart: Optional[str] = None,
+        values: Optional[List[str]] = None,
+        namespace: str = "default",
+    ) -> int:
+        console.print(Panel.fit(Text("VALIDATE VALUES"), style="bold green"))
+        if not self.validate_bundles():
+            return 1
+        return values_validate.validate_chart_values(
+            new_bundle=self.new_bundle,
+            logger=self.logger,
+            run_kubectl=self.run_kubectl,
+            console=console,
+            chart_name=chart_name or "wire-server",
+            chart=chart,
+            values=values,
+            namespace=namespace,
+        )
 
     def cmd_setup_kubeconfig(self) -> int:
         console.print(Panel.fit(Text("SETUP KUBECONFIG"), style="bold green"))

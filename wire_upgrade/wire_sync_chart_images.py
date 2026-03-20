@@ -14,6 +14,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import yaml
+
 from wire_upgrade.config import load_config
 from wire_upgrade.wire_sync_lib import (
     now_ts,
@@ -210,6 +212,119 @@ def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, v
     return results, failed, unmatched
 
 
+def _check_missing_remote_deps(chart_path: Path) -> list:
+    """Return remote dependency names that are not yet present in chart_path/charts/.
+
+    Deps with a file:// repository are ignored (expected to be present in the bundle).
+    """
+    chart_yaml = chart_path / "Chart.yaml"
+    if not chart_yaml.exists():
+        return []
+    data = yaml.safe_load(chart_yaml.read_text()) or {}
+    missing = []
+    for dep in data.get("dependencies", []):
+        name = dep.get("name", "")
+        repo = dep.get("repository", "")
+        if repo.startswith("file://"):
+            continue
+        charts_dir = chart_path / "charts"
+        has_dir = (charts_dir / name).exists()
+        has_tgz = any(charts_dir.glob(f"{name}-*.tgz")) if charts_dir.exists() else False
+        if not has_dir and not has_tgz:
+            missing.append(name)
+    return missing
+
+
+def _run_helm_dep_update(bundle: Path, chart_path: Path) -> tuple:
+    """Run helm dependency update for chart_path inside the bundle container."""
+    bundle_prefix = str(bundle) + "/"
+    rel_chart = str(chart_path)[len(bundle_prefix):] if str(chart_path).startswith(bundle_prefix) else str(chart_path)
+    inner = f"helm dependency update {rel_chart}"
+    full_cmd = build_offline_cmd(inner, str(bundle), use_d=True)
+    argv = build_exec_argv(full_cmd)
+    rc, out, err, _ = run_cmd(argv)
+    return rc, out, err
+
+
+def _pull_image_to_dir(image_ref: str, dest_dir: Path) -> tuple:
+    """Pull image via docker on the admin host and save to dest_dir.
+
+    Returns (rc, tar_path, error_string).
+    tar_path is None on failure.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_tar = dest_dir / image_ref_to_filename(image_ref)
+
+    rc, _, err, _ = run_cmd(["sudo", "docker", "pull", image_ref])
+    if rc != 0:
+        return rc, None, err
+
+    rc, _, err, _ = run_cmd(["sudo", "docker", "save", image_ref, "-o", str(dest_tar)])
+    if rc != 0:
+        return rc, None, err
+
+    run_cmd(["sudo", "chmod", "644", str(dest_tar)])
+    return 0, dest_tar, ""
+
+
+def _pull_and_load_upstream(unmatched: dict, bundle: Path, chart_name: str, nodes: list, ssh_user: str, dry_run: bool, verbose: bool) -> tuple:
+    """Pull each unmatched image from upstream and load to every k8s node.
+
+    Args:
+        unmatched: Dict mapping filename → image_ref for images not found in bundle tars.
+        bundle: Path to the new bundle.
+        chart_name: Used to name the tmp directory: <bundle>/tmp/<chart_name>-images/.
+        nodes: List of k8s node IPs/hostnames.
+        ssh_user: SSH user for connecting to nodes.
+        dry_run: If True, print actions without executing.
+        verbose: Show ctr output per node.
+
+    Returns:
+        (results, failed)
+        results: list of result dicts (image, filename, source, node, rc, verified)
+        failed: list of "filename@step" strings
+    """
+    tmp_dir = bundle / "tmp" / f"{chart_name}-images"
+    results = []
+    failed = []
+
+    for fname, img_ref in sorted(unmatched.items()):
+        print(f"\n[upstream] {img_ref}")
+        if dry_run:
+            for node in nodes:
+                print(f"  [dry-run] pull → {node}")
+            continue
+
+        rc, tar_path, err = _pull_image_to_dir(img_ref, tmp_dir)
+        if rc != 0:
+            print(f"  PULL FAILED: {err.strip()}")
+            failed.append(f"{fname}@pull")
+            continue
+
+        data = tar_path.read_bytes()
+        for node in nodes:
+            print(f"  → {node} ...", end="", flush=True)
+            rc, out, err, verified = _send_to_node(data, node, ssh_user, img_ref)
+            status = "OK" if (rc == 0 and verified) else ("OK (verify failed)" if rc == 0 else "FAIL")
+            print(f" {status}")
+            if verbose and rc == 0 and out.strip():
+                for line in out.strip().splitlines():
+                    print(f"    {line}")
+            if rc != 0:
+                print(f"    {err.strip()}")
+                failed.append(f"{fname}@{node}")
+            results.append({
+                "image": img_ref,
+                "filename": fname,
+                "source": "upstream",
+                "node": node,
+                "rc": rc,
+                "verified": verified,
+            })
+
+    return results, failed
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sync chart images from bundle tars directly to k8s node containerd.",
@@ -229,8 +344,12 @@ def parse_args(argv=None):
         metavar="TAR",
         help=f"Container tar archives to search: {', '.join(TAR_FILES.keys())}, or all (default: containers-helm)",
     )
-    p.add_argument("--dry-run",  action="store_true", help="Show matched images and target nodes without loading")
-    p.add_argument("--verbose",  action="store_true", help="Show ctr output per node")
+    p.add_argument("--dry-run",       action="store_true", help="Show matched images and target nodes without loading")
+    p.add_argument("--verbose",       action="store_true", help="Show ctr output per node")
+    p.add_argument("--update-deps",   action="store_true",
+        help="Run helm dependency update if remote deps are missing from chart")
+    p.add_argument("--pull-upstream", action="store_true",
+        help="Pull images not found in bundle tars from upstream registries using docker")
     return p.parse_args(argv)
 
 
@@ -278,6 +397,19 @@ def main(argv=None):
         print("ERROR: No kube-master or kube-node hosts found in inventory")
         return 1
 
+    # Optionally update chart dependencies before templating
+    if args.update_deps:
+        missing_deps = _check_missing_remote_deps(chart_path)
+        if missing_deps:
+            print(f"Missing remote deps: {', '.join(missing_deps)}. Running helm dependency update...")
+            rc, out, err = _run_helm_dep_update(bundle, chart_path)
+            if rc != 0:
+                print(f"ERROR: helm dependency update failed:\n{err.strip()}")
+                return 1
+            print("Helm dependency update complete.")
+        else:
+            print("All chart dependencies are present.")
+
     # Run helm template to discover image references
     values_files = find_values_files(bundle, chart_name)
     print(f"Running helm template for '{release}' ({chart_path.name})...")
@@ -303,10 +435,20 @@ def main(argv=None):
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results, failed, unmatched = _load_from_tars(tar_paths, wanted, nodes, ssh_user, args.verbose, dry_run)
 
-    for fname in sorted(unmatched):
-        img_ref = wanted[fname]
-        print(f"WARN: {img_ref} not found in any tar (expected {fname})")
-        warnings.append(f"Missing in tars: {fname}")
+    upstream_results = []
+    upstream_failed = []
+    if unmatched and args.pull_upstream:
+        print(f"\nPulling {len(unmatched)} unmatched image(s) from upstream...")
+        unmatched_map = {fname: wanted[fname] for fname in unmatched}
+        upstream_results, upstream_failed = _pull_and_load_upstream(
+            unmatched_map, bundle, chart_name, nodes, ssh_user, dry_run, args.verbose
+        )
+        failed.extend(upstream_failed)
+    elif unmatched:
+        for fname in sorted(unmatched):
+            img_ref = wanted[fname]
+            print(f"WARN: {img_ref} not found in any tar (use --pull-upstream to fetch from upstream)")
+            warnings.append(f"Missing in tars: {fname}")
 
     print()
     if dry_run:
@@ -332,6 +474,7 @@ def main(argv=None):
         "tars": [str(tp) for tp in tar_paths],
         "images": images,
         "results": results,
+        "upstream_results": upstream_results,
         "unmatched": sorted(unmatched),
         "errors": errors,
         "warnings": warnings,
