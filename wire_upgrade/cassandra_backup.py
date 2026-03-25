@@ -370,11 +370,12 @@ def verify_snapshot(host, keyspace, snapshot_name, verbose=False):
     """Verify a snapshot is complete across every table directory in the keyspace.
 
     Returns (ok, report) where report is a dict with keys:
-      total    - number of table dirs found
+      total    - number of table dirs with data that were snapshotted
       ok       - table dirs with a non-empty snapshot
-      missing  - table dirs with no snapshot subdir
+      missing  - table dirs that have .db files but no snapshot subdir (real error)
       empty    - table dirs whose snapshot subdir has no files
-      issues   - list of human-readable problem strings
+      issues   - list of human-readable problem strings (errors only)
+      info     - list of informational messages (e.g. empty/dropped tables skipped)
     """
     cmd = (
         f"bash -lc '"
@@ -382,9 +383,17 @@ def verify_snapshot(host, keyspace, snapshot_name, verbose=False):
         f"if [ ! -d \"$DATA_DIR\" ]; then echo NO_KEYSPACE; exit 1; fi; "
         f"total=0; ok=0; missing=0; empty=0; "
         f"for tdir in $(find \"$DATA_DIR\" -maxdepth 1 -mindepth 1 -type d); do "
-        f"  total=$((total+1)); "
         f"  sdir=$tdir/snapshots/{snapshot_name}; "
-        f"  if [ ! -d \"$sdir\" ]; then echo \"MISSING:$(basename $tdir)\"; missing=$((missing+1)); continue; fi; "
+        f"  if [ ! -d \"$sdir\" ]; then "
+        f"    has_data=$(find \"$tdir\" -maxdepth 1 -name '*.db' -type f 2>/dev/null | wc -l); "
+        f"    if [ \"$has_data\" -eq 0 ]; then "
+        f"      echo \"INFO:no-data:$(basename $tdir)\"; "
+        f"    else "
+        f"      total=$((total+1)); echo \"MISSING:$(basename $tdir)\"; missing=$((missing+1)); "
+        f"    fi; "
+        f"    continue; "
+        f"  fi; "
+        f"  total=$((total+1)); "
         f"  count=$(find \"$sdir\" -type f 2>/dev/null | wc -l); "
         f"  if [ \"$count\" -eq 0 ]; then echo \"EMPTY:$(basename $tdir)\"; empty=$((empty+1)); continue; fi; "
         f"  echo \"OK:$(basename $tdir):$count\"; ok=$((ok+1)); "
@@ -394,10 +403,10 @@ def verify_snapshot(host, keyspace, snapshot_name, verbose=False):
     rc, out, err = run_ssh(host, cmd)
     if rc != 0:
         combined = (err or "").strip() or (out or "").strip()
-        return False, {"issues": [combined or "ssh/bash error"]}
+        return False, {"issues": [combined or "ssh/bash error"], "info": []}
 
     lines = (out or "").splitlines()
-    report = {"total": 0, "ok": 0, "missing": 0, "empty": 0, "issues": []}
+    report = {"total": 0, "ok": 0, "missing": 0, "empty": 0, "issues": [], "info": []}
     for line in lines:
         if line.startswith("SUMMARY:"):
             parts = line.split(":")
@@ -407,6 +416,9 @@ def verify_snapshot(host, keyspace, snapshot_name, verbose=False):
             report["empty"]   = int(parts[4]) if len(parts) > 4 else 0
         elif line.startswith("MISSING:") or line.startswith("EMPTY:"):
             report["issues"].append(line)
+        elif line.startswith("INFO:no-data:"):
+            table_dir = line[len("INFO:no-data:"):]
+            report["info"].append(f"skipped (no SSTables): {table_dir}")
         elif line == "NO_KEYSPACE":
             report["issues"].append(f"keyspace directory not found: {CASSANDRA_DATA_DIR}/{keyspace}")
 
@@ -633,6 +645,9 @@ def main(argv=None):
                     print(f"  FAIL {ks}: {report['missing']} missing, {report['empty']} empty of {report['total']} tables")
                     for issue in report["issues"]:
                         print(f"    - {issue}")
+                if args.verbose:
+                    for msg in report.get("info", []):
+                        print(f"    INFO {ks}: {msg}")
         return 0 if all_ok else 1
 
     # Handle clear-snapshots (manual)
@@ -800,7 +815,12 @@ def main(argv=None):
             ok, report = verify_snapshot(host, ks, args.snapshot_name, args.verbose)
             size = get_snapshot_size(host, args.snapshot_name, args.verbose)
             if ok:
-                print(f"  OK {ks}: {report['ok']}/{report['total']} tables verified (size: {size})")
+                skipped = len(report.get("info", []))
+                skip_note = f", {skipped} empty/dropped skipped" if skipped else ""
+                print(f"  OK {ks}: {report['ok']}/{report['total']} tables verified (size: {size}{skip_note})")
+                if args.verbose:
+                    for msg in report.get("info", []):
+                        print(f"    INFO {ks}: {msg}")
                 results["backups"].append({
                     "host": host, "keyspace": ks,
                     "status": "success", "tables": report["ok"], "size": size,

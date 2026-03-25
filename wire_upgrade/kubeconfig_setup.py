@@ -59,6 +59,7 @@ d() {
         -e KUBECONFIG=/$MOUNT_POINT/ansible/inventory/offline/artifacts/admin.conf \\
         -v $HOME/.ssh:/root/.ssh \\
         -v $PWD:/$MOUNT_POINT \\
+        -w /$MOUNT_POINT \\
         $WSD_CONTAINER "$@"
 }
 """

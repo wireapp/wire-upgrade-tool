@@ -94,21 +94,9 @@ def _build_helm_command(
     new_bundle: Path,
     dry_run: bool = False,
     reuse_values: bool = False,
+    set_values: Optional[List[str]] = None,
 ) -> str:
-    """Build the helm upgrade/install command.
-
-    Args:
-        release: Helm release name.
-        chart_path: Path to the chart.
-        namespace: Kubernetes namespace.
-        values: List of values files.
-        new_bundle: Path to new bundle (for path normalization).
-        dry_run: Whether to add --dry-run flag.
-        reuse_values: Whether to add --reuse-values flag.
-
-    Returns:
-        Complete helm command string.
-    """
+    """Build the helm upgrade/install command."""
     cmd_parts = [
         "helm",
         "upgrade",
@@ -128,6 +116,9 @@ def _build_helm_command(
         if vf_path.startswith(bundle_prefix):
             vf_path = vf_path[len(bundle_prefix):]
         cmd_parts.extend(["-f", vf_path])
+
+    for sv in set_values or []:
+        cmd_parts.extend(["--set", sv])
 
     if reuse_values:
         cmd_parts.append("--reuse-values")
@@ -311,9 +302,11 @@ def install_or_upgrade(
     chart: Optional[str] = None,
     release: Optional[str] = None,
     values: Optional[List[str]] = None,
+    set_values: Optional[List[str]] = None,
     reuse_values: bool = False,
     namespace: str = "default",
     dry_run: bool = False,
+    skip_validate: bool = False,
 ) -> int:
     """Install or upgrade a Helm chart.
 
@@ -326,9 +319,11 @@ def install_or_upgrade(
         chart: Chart path (defaults to chart_name if not provided).
         release: Helm release name.
         values: List of values files to pass to helm.
+        set_values: List of --set overrides (e.g. 'key=value').
         reuse_values: If True, reuse values from existing release.
         namespace: Kubernetes namespace (default: 'default').
         dry_run: If True, adds --dry-run to helm command.
+        skip_validate: If True, skip helm template pre-validation.
 
     Returns:
         0 on success, 1 on error.
@@ -373,8 +368,26 @@ def install_or_upgrade(
     # Resolve chart path
     chart_path = _resolve_chart_path(new_bundle, chart_name, chart)
 
+    # Pre-flight: validate template rendering before deploying
+    # Skipped when --reuse-values is set (no values files to validate against)
+    if not skip_validate and not reuse_values:
+        template_parts = ["helm", "template", release, chart_path]
+        for vf in values or []:
+            bundle_prefix = str(new_bundle) + "/"
+            vf_path = vf[len(bundle_prefix):] if vf.startswith(bundle_prefix) else vf
+            template_parts += ["-f", vf_path]
+        for sv in set_values or []:
+            template_parts += ["--set", sv]
+        template_parts += ["-n", namespace]
+        rc, _, err = run_kubectl(" ".join(template_parts))
+        if rc != 0:
+            logger.error("Template rendering failed — fix values before deploying:")
+            console.print(err, style="red")
+            return 1
+        logger.success("Template rendering passed")
+
     # Build helm command
-    cmd = _build_helm_command(release, chart_path, namespace, values, new_bundle, dry_run, reuse_values)
+    cmd = _build_helm_command(release, chart_path, namespace, values, new_bundle, dry_run, reuse_values, set_values)
 
     # Show values diff if upgrade (not new install)
     _show_values_diff(run_kubectl, namespace, release, values, new_bundle, logger, console)

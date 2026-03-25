@@ -264,13 +264,15 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
         ctx: typer.Context,
         chart_name: Optional[str] = typer.Argument(None, help="Chart name (default: wire-server)"),
         chart: Optional[str] = typer.Option(None, "--chart", help="Override chart path (relative to new bundle)"),
+        release: Optional[str] = typer.Option(None, "--release", help="Helm release name (defaults to chart name)"),
         values: Optional[List[str]] = typer.Option(None, "--values", help="Values file (repeatable)"),
         namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
     ):
-        """Lint values files against a Helm chart and diff against chart defaults."""
+        """Validate values files against a Helm chart and diff against live cluster values."""
         _run(ctx, "cmd_validate_values",
             chart_name=chart_name,
             chart=chart,
+            release=release,
             values=values,
             namespace=namespace,
         )

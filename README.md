@@ -269,6 +269,32 @@ wire-upgrade sync-values wire-server
 wire-upgrade install-or-upgrade wire-server
 ```
 
+### validate-values
+Validate custom values files against a Helm chart without deploying. Runs four
+checks and shows results for each:
+
+1. **Sub-chart dependencies** — `helm dependency list` (informational)
+2. **Template rendering** — `helm template` with your values applied; fails if
+   the chart cannot be rendered (e.g. missing required values, type errors)
+3. **Values diff** — shows what will change vs the currently deployed release
+4. **Chart defaults audit** — shows which chart default values are not covered
+   by your custom values files
+
+```sh
+# Validate wire-server (default)
+wire-upgrade validate-values
+
+# Validate a specific chart and release
+wire-upgrade validate-values postgresql-external --release my-postgres -n prod
+
+# Validate with explicit values files
+wire-upgrade validate-values wire-server \
+    --values /home/demo/new/values/wire-server/values.yaml \
+    --values /home/demo/new/values/wire-server/secrets.yaml
+```
+
+Returns exit code 0 if template rendering passes, 1 if it fails.
+
 ### install-or-upgrade
 Deploy or upgrade a Helm chart. Automatically validates template rendering
 before deploying — if `helm template` fails the deployment is aborted.
@@ -434,6 +460,7 @@ flowchart TD
     CLI[commands.py\nTyper CLI] --> ORC[orchestrator.py\nUpgradeOrchestrator]
 
     ORC --> CI[chart_install.py\ninstall_or_upgrade\nfind_values_files\nshow_values_diff]
+    ORC --> VV[values_validate.py\nvalidate_chart_values]
     ORC --> VS[values_sync.py\nsync_chart_values\nset_pg_password\nfind_services_with_postgresql]
     ORC --> CB[cassandra_backup.py\nsnapshot / restore]
     ORC --> CCL[cleanup_containerd_images.py\nimage pruning]

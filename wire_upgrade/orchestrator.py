@@ -900,6 +900,7 @@ class UpgradeOrchestrator:
         self,
         chart_name: Optional[str] = None,
         chart: Optional[str] = None,
+        release: Optional[str] = None,
         values: Optional[List[str]] = None,
         namespace: str = "default",
     ) -> int:
@@ -913,6 +914,7 @@ class UpgradeOrchestrator:
             console=console,
             chart_name=chart_name or "wire-server",
             chart=chart,
+            release=release,
             values=values,
             namespace=namespace,
         )
