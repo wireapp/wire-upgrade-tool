@@ -16,17 +16,22 @@ This tool is designed for Wire Server deployments that:
 
 ### Prerequisites
 
-Before using this tool:
+Complete these steps **in order** before running any upgrade commands:
 
 1. An existing Wire Server deployment must be running (the **old bundle** at
    e.g. `/home/demo/wire-server-deploy`)
 2. The **new bundle** (built from `wire-server-deploy`) must be copied to the
    admin host (e.g. `/home/demo/new`)
 3. `wire-upgrade` must be installed on the admin host (see [Installation](#installation))
-4. `upgrade-config.json` must be created pointing to both bundles
-   (`wire-upgrade init-config`)
-5. Run `wire-upgrade setup-kubeconfig` once to copy the kubeconfig from the
-   old bundle into the new bundle
+4. Create `upgrade-config.json` pointing to both bundles:
+   ```sh
+   wire-upgrade init-config --new-bundle /home/demo/new --old-bundle /home/demo/wire-server-deploy
+   ```
+5. **Run `wire-upgrade setup-kubeconfig`** — this is mandatory before any other
+   command. It copies `admin.conf` from the old bundle into the new bundle and
+   patches `bin/offline-env.sh` so that `helm` and `kubectl` (run inside the
+   bundle's Docker container) can reach the cluster. Without this step all
+   Helm and Ansible commands will fail.
 
 ---
 
@@ -38,6 +43,13 @@ Install the latest release directly on the admin host:
 
 ```sh
 pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.2/wire_upgrade-0.1.2-py3-none-any.whl
+```
+
+If `wire-upgrade` is not found after install, pip placed the script in
+`~/.local/bin` which is not on `PATH`. Add it permanently:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
 ### Updating
@@ -93,9 +105,12 @@ The CLI reads options from a JSON config file named `upgrade-config.json`.
 }
 ```
 
-Any field may be overridden on the command line. `kubeconfig` must point to an
-existing file — there is no fallback to `~/.kube/config`. `tools_dir` defaults
-to the installed package directory.
+Any field may be overridden on the command line. `kubeconfig` is optional after
+running `setup-kubeconfig` — the tool auto-detects it from
+`new_bundle/ansible/inventory/offline/artifacts/admin.conf` (where
+`setup-kubeconfig` places it), falling back to a search in the old bundle root.
+If set explicitly it must point to an existing file; there is no fallback to
+`~/.kube/config`. `tools_dir` defaults to the installed package directory.
 
 Command-line flags take precedence over the config file.
 
