@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import subprocess
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml
@@ -120,14 +121,52 @@ def _normalize_image_ref(ref: str) -> str:
     return ref
 
 
+def _image_exists_on_node(node: str, ssh_user: str, normalized_ref: str) -> bool:
+    """Return True if the image already exists in containerd on node."""
+    cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=10",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPath=/tmp/wire-upgrade-ctl-%h-%p-%r",
+        "-o", "ControlPersist=60",
+        f"{ssh_user}@{node}",
+        f"sudo /usr/local/bin/ctr -n k8s.io images ls -q name=={normalized_ref}",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+        return normalized_ref in proc.stdout.decode(errors="replace")
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _nodes_missing_image(nodes: list, ssh_user: str, normalized_ref: str) -> list:
+    """Return nodes where the image is not yet present, checked in parallel."""
+    with ThreadPoolExecutor(max_workers=min(len(nodes), 8)) as executor:
+        future_to_node = {
+            executor.submit(_image_exists_on_node, n, ssh_user, normalized_ref): n
+            for n in nodes
+        }
+        present = {future_to_node[f] for f in as_completed(future_to_node) if f.result()}
+    return [n for n in nodes if n not in present]
+
+
 def _send_to_node(data: bytes, node: str, ssh_user: str, image_ref: str) -> tuple:
-    """Pipe image tar to containerd and verify the image exists — single SSH connection."""
+    """Pipe image tar to containerd and verify the image exists.
+
+    Uses SSH ControlMaster so repeated calls to the same node reuse the existing
+    TCP connection instead of doing a full handshake each time.
+    """
     normalized = _normalize_image_ref(image_ref)
     cmd = [
         "ssh",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=10",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPath=/tmp/wire-upgrade-ctl-%h-%p-%r",
+        "-o", "ControlPersist=60",
         f"{ssh_user}@{node}",
         f"sudo /usr/local/bin/ctr -n k8s.io images import - && sudo /usr/local/bin/ctr -n k8s.io images ls -q name=={normalized}",
     ]
@@ -137,15 +176,46 @@ def _send_to_node(data: bytes, node: str, ssh_user: str, image_ref: str) -> tupl
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    out, err = proc.communicate(input=data)
+    try:
+        out, err = proc.communicate(input=data, timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return 1, "", f"Timed out after 600s ({len(data) // (1024*1024)} MB)", False
     out_str = out.decode(errors="replace")
     err_str = err.decode(errors="replace")
     verified = normalized in out_str
     return proc.returncode, out_str, err_str, verified
 
 
-def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, verbose: bool, dry_run: bool) -> tuple:
+def _send_to_nodes_parallel(data: bytes, nodes: list, ssh_user: str, img_ref: str) -> list:
+    """Send image data to all nodes concurrently.
+
+    Returns list of (node, rc, out, err, verified) in the original node order.
+    """
+    with ThreadPoolExecutor(max_workers=min(len(nodes), 8)) as executor:
+        future_to_node = {
+            executor.submit(_send_to_node, data, node, ssh_user, img_ref): node
+            for node in nodes
+        }
+        node_results = {}
+        for future in as_completed(future_to_node):
+            node = future_to_node[future]
+            try:
+                rc, out, err, verified = future.result()
+            except Exception as exc:
+                rc, out, err, verified = 1, "", str(exc), False
+            node_results[node] = (rc, out, err, verified)
+    return [(node, *node_results[node]) for node in nodes]
+
+
+def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, verbose: bool, dry_run: bool, skip_existing: bool = False) -> tuple:
     """Single pass through each tar to find, extract, and load matched images.
+
+    Processes images sequentially (one at a time) to keep peak memory bounded to
+    a single image. Each image is sent to all nodes in parallel via
+    _send_to_nodes_parallel. With ~1 GB images the bottleneck is network
+    throughput, not disk read, so image-level parallelism adds no benefit.
 
     Args:
         tar_paths: List of Path objects for the tar archives to search.
@@ -154,6 +224,7 @@ def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, v
         ssh_user: SSH user for connecting to nodes.
         verbose: Show ctr output per node.
         dry_run: If True, skip actual loading.
+        skip_existing: If True, check each node before sending and skip if already present.
 
     Returns:
         (results, failed, unmatched_filenames)
@@ -182,6 +253,19 @@ def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, v
                         print(f"  [dry-run] → {node}")
                     continue
 
+                # Determine which nodes actually need this image
+                if skip_existing:
+                    normalized = _normalize_image_ref(img_ref)
+                    target_nodes = _nodes_missing_image(nodes, ssh_user, normalized)
+                    for node in nodes:
+                        if node not in target_nodes:
+                            print(f"  {node}: already present — skip")
+                            results.append({"image": img_ref, "filename": fname, "tar": tar_path.name, "node": node, "rc": 0, "verified": True, "skipped": True})
+                    if not target_nodes:
+                        continue
+                else:
+                    target_nodes = nodes
+
                 fh = tf.extractfile(member)
                 if fh is None:
                     print(f"  ERROR: could not extract member")
@@ -189,24 +273,23 @@ def _load_from_tars(tar_paths: list, wanted: dict, nodes: list, ssh_user: str, v
                     continue
                 data = fh.read()
 
-                for node in nodes:
-                    print(f"  → {node} ...", end="", flush=True)
-                    rc, out, err, verified = _send_to_node(data, node, ssh_user, img_ref)
+                mb = len(data) / (1024 * 1024)
+                print(f"  → {', '.join(target_nodes)} (parallel, {mb:.0f} MB)", flush=True)
+                for node, rc, out, err, verified in _send_to_nodes_parallel(data, target_nodes, ssh_user, img_ref):
                     if rc != 0:
-                        print(f" FAIL")
+                        print(f"  {node}: FAIL")
                         print(f"    {err.strip()}")
                         failed.append(f"{fname}@{node}")
                         results.append({"image": img_ref, "filename": fname, "tar": tar_path.name, "node": node, "rc": rc, "verified": False})
-                        continue
-
-                    status = "OK" if verified else "OK (verify failed)"
-                    print(f" {status}")
-                    if verbose and out.strip():
-                        for line in out.strip().splitlines():
-                            print(f"    {line}")
-                    if not verified:
-                        failed.append(f"{fname}@{node}:verify")
-                    results.append({"image": img_ref, "filename": fname, "tar": tar_path.name, "node": node, "rc": rc, "verified": verified})
+                    else:
+                        status = "OK" if verified else "OK (verify failed)"
+                        print(f"  {node}: {status}")
+                        if verbose and out.strip():
+                            for line in out.strip().splitlines():
+                                print(f"    {line}")
+                        if not verified:
+                            failed.append(f"{fname}@{node}:verify")
+                        results.append({"image": img_ref, "filename": fname, "tar": tar_path.name, "node": node, "rc": rc, "verified": verified})
 
     unmatched = set(wanted.keys()) - found
     return results, failed, unmatched
@@ -302,11 +385,10 @@ def _pull_and_load_upstream(unmatched: dict, bundle: Path, chart_name: str, node
             continue
 
         data = tar_path.read_bytes()
-        for node in nodes:
-            print(f"  → {node} ...", end="", flush=True)
-            rc, out, err, verified = _send_to_node(data, node, ssh_user, img_ref)
+        print(f"  → {', '.join(nodes)} (parallel)", flush=True)
+        for node, rc, out, err, verified in _send_to_nodes_parallel(data, nodes, ssh_user, img_ref):
             status = "OK" if (rc == 0 and verified) else ("OK (verify failed)" if rc == 0 else "FAIL")
-            print(f" {status}")
+            print(f"  {node}: {status}")
             if verbose and rc == 0 and out.strip():
                 for line in out.strip().splitlines():
                     print(f"    {line}")
@@ -344,8 +426,12 @@ def parse_args(argv=None):
         metavar="TAR",
         help=f"Container tar archives to search: {', '.join(TAR_FILES.keys())}, or all (default: containers-helm)",
     )
-    p.add_argument("--dry-run",       action="store_true", help="Show matched images and target nodes without loading")
-    p.add_argument("--verbose",       action="store_true", help="Show ctr output per node")
+    p.add_argument("--dry-run",        action="store_true", help="Show matched images and target nodes without loading")
+    p.add_argument("--verbose",        action="store_true", help="Show ctr output per node")
+    p.add_argument("--skip-existing",  action="store_true",
+        help="Skip images already present in containerd on each node (safe for reruns)")
+    p.add_argument("--image",          action="append", dest="images", metavar="IMAGE",
+        help="Only sync this image ref (repeatable); default: all images in chart")
     p.add_argument("--update-deps",   action="store_true",
         help="Run helm dependency update if remote deps are missing from chart")
     p.add_argument("--pull-upstream", action="store_true",
@@ -402,7 +488,7 @@ def main(argv=None):
         missing_deps = _check_missing_remote_deps(chart_path)
         if missing_deps:
             print(f"Missing remote deps: {', '.join(missing_deps)}. Running helm dependency update...")
-            rc, out, err = _run_helm_dep_update(bundle, chart_path)
+            rc, _, err = _run_helm_dep_update(bundle, chart_path)
             if rc != 0:
                 print(f"ERROR: helm dependency update failed:\n{err.strip()}")
                 return 1
@@ -425,15 +511,25 @@ def main(argv=None):
 
     print(f"Found {len(images)} image reference(s) in chart '{chart_name}'")
 
-    # Build wanted dict: filename → image_ref
+    # Build wanted dict: filename → image_ref, optionally filtered by --image
     wanted = {image_ref_to_filename(img): img for img in images}
+    if args.images:
+        unknown = [i for i in args.images if i not in images]
+        if unknown:
+            for ref in unknown:
+                print(f"WARN: --image {ref} not found in helm template output — skipping")
+        wanted = {k: v for k, v in wanted.items() if v in args.images}
+        if not wanted:
+            print("ERROR: none of the specified --image refs were found in the chart")
+            return 1
+        print(f"Filtering to {len(wanted)} image(s) via --image")
 
     print(f"Target nodes: {', '.join(nodes)}")
     print(f"Tar archive(s): {', '.join(tp.name for tp in tar_paths)}")
 
     # Single pass through each tar: find matches (and load if not dry-run)
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    results, failed, unmatched = _load_from_tars(tar_paths, wanted, nodes, ssh_user, args.verbose, dry_run)
+    results, failed, unmatched = _load_from_tars(tar_paths, wanted, nodes, ssh_user, args.verbose, dry_run, skip_existing=args.skip_existing)
 
     upstream_results = []
     upstream_failed = []

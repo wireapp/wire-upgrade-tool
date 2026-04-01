@@ -361,6 +361,8 @@ class UpgradeOrchestrator:
         verbose: bool = False,
         update_deps: bool = False,
         pull_upstream: bool = False,
+        skip_existing: bool = False,
+        images: Optional[List[str]] = None,
     ) -> int:
         from wire_upgrade import wire_sync_chart_images
         console.print(Panel.fit(Text("SYNC CHART IMAGES"), style="bold green"))
@@ -382,6 +384,10 @@ class UpgradeOrchestrator:
             args.append("--update-deps")
         if pull_upstream:
             args.append("--pull-upstream")
+        if skip_existing:
+            args.append("--skip-existing")
+        for img in (images or []):
+            args.extend(["--image", img])
         return wire_sync_chart_images.main(args)
 
     def _run_cassandra_backup(self, args: list[str]) -> int:

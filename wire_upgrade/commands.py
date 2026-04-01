@@ -76,6 +76,10 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             help="Run helm dependency update if remote deps are missing from chart"),
         pull_upstream: bool = typer.Option(False, "--pull-upstream",
             help="Pull images not found in bundle tars from upstream registries using docker"),
+        skip_existing: bool = typer.Option(False, "--skip-existing",
+            help="Skip images already present in containerd on each node (safe for reruns)"),
+        images: Optional[List[str]] = typer.Option(None, "--image",
+            help="Only sync this image ref (repeatable); default: all images in chart"),
     ):
         """Sync chart-specific images from bundle tars directly to k8s node containerd."""
         _run(ctx, "cmd_sync_chart_images",
@@ -87,6 +91,8 @@ def register_commands(app: typer.Typer, console, get_orchestrator: Callable):
             verbose=verbose,
             update_deps=update_deps,
             pull_upstream=pull_upstream,
+            skip_existing=skip_existing,
+            images=images,
         )
 
     @app.command("sync-images")
