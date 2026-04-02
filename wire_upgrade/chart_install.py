@@ -342,7 +342,8 @@ def install_or_upgrade(
             chart = "charts/wire-server"
 
         # Build values list from values/{chart-name}/ directory if not provided
-        if not values:
+        # Skip when --reuse-values is set: Helm re-applies stored values, no files needed
+        if not values and not reuse_values:
             values = find_values_files(new_bundle, chart_name)
             if not values:
                 logger.info(f"No values files found in values/{chart_name}/. Using chart defaults.")
@@ -356,7 +357,8 @@ def install_or_upgrade(
             release = chart_name
 
         # Build values list from values/{chart-name}/ if not provided
-        if not values:
+        # Skip when --reuse-values is set: Helm re-applies stored values, no files needed
+        if not values and not reuse_values:
             values = find_values_files(new_bundle, chart_name)
             if not values:
                 logger.info(f"No values files found in values/{chart_name}/. Using chart defaults.")
