@@ -222,6 +222,17 @@ wire-upgrade sync-chart-images --verbose
 
 # Search additional tar archive
 wire-upgrade sync-chart-images --tar containers-helm --tar containers-system
+
+# Resume after partial failure — skips images already present on each node
+wire-upgrade sync-chart-images wire-server --skip-existing
+
+# Retry a single image
+wire-upgrade sync-chart-images wire-server --image quay.io/wire/nginz:5.27.0
+
+# Retry multiple images
+wire-upgrade sync-chart-images wire-server \
+    --image quay.io/wire/nginz:5.27.0 \
+    --image quay.io/wire/brig:5.27.0
 ```
 
 ### backup
@@ -408,6 +419,72 @@ flowchart TD
     I --> I2["install-or-upgrade wire-server<br/>validates + deploys"]
     I2 --> J["cleanup-containerd<br/>remove old images from nodes"]
     J --> K([done])
+```
+
+---
+
+### Chart Upgrade Flow
+
+The recommended four-step sequence to upgrade any single chart (e.g.
+`wire-server`, `account-pages`, `postgresql-external`):
+
+```
+sync-values  →  validate-values  →  sync-chart-images  →  install-or-upgrade
+```
+
+**Step 1 — sync-values**: fetch the live values from the running Helm release
+and merge them into the new bundle's template files. This produces
+`values/{chart}/values.yaml` and `values/{chart}/secrets.yaml` with your
+cluster's current config, extended with any new keys introduced in the new
+chart version.
+
+```sh
+wire-upgrade sync-values wire-server -n prod
+```
+
+**Step 2 — validate-values**: render the chart with the merged values and
+compare against the currently deployed release. Catches rendering errors and
+shows exactly what will change before anything is deployed.
+
+```sh
+wire-upgrade validate-values wire-server -n prod
+```
+
+Fix any issues in `values/{chart}/values.yaml` or `secrets.yaml` before
+continuing.
+
+**Step 3 — sync-chart-images**: load the images required by the new chart
+version into containerd on every k8s node. Uses `helm template` to determine
+which images the chart needs, then streams matching entries from the bundle tar
+directly to each node via SSH.
+
+```sh
+wire-upgrade sync-chart-images wire-server
+# Resume after a partial failure (skips images already present):
+wire-upgrade sync-chart-images wire-server --skip-existing
+# Retry a single image:
+wire-upgrade sync-chart-images wire-server --image quay.io/wire/nginz:5.27.0
+```
+
+**Step 4 — install-or-upgrade**: deploy the chart. Runs `helm template`
+pre-flight validation, shows a diff of what is changing, then executes
+`helm upgrade --install` with `--timeout 15m --wait`.
+
+```sh
+wire-upgrade install-or-upgrade wire-server -n prod
+```
+
+```mermaid
+flowchart TD
+    A([start]) --> B["sync-values\nfetch cluster values → merge into\nbundle templates"]
+    B --> C["validate-values\nhelm template + diff + defaults audit"]
+    C --> D{renders OK?}
+    D -->|no — fix values| C
+    D -->|yes| E["sync-chart-images\nstream images from bundle tar\nto each k8s node via SSH"]
+    E --> F["install-or-upgrade\nhelm upgrade --install\n--timeout 15m --wait"]
+    F --> G{deployed?}
+    G -->|yes| H([done])
+    G -->|no| I([check pod status / rollback])
 ```
 
 ---
