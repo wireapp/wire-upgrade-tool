@@ -19,6 +19,8 @@ independently.
 Should the comprehensive validation run automatically inside `install-or-upgrade`,
 or should it be a separate command?
 
+While `validate-values` runs `helm template` as a pre-flight guard, this only confirms the chart *renders* without error. It does not validate whether the rendered Kubernetes manifests are correct for Wire's operational requirements (offline registry usage, resource limits, required labels, etc.).
+
 ## Decision Drivers
 
 * Operators should be able to validate values after `sync-values` (or after
@@ -107,3 +109,82 @@ matching the actual deployment context and producing no false positives.
 * Good, because comprehensive validation is available on demand
 * Good, because the two commands compose naturally in an upgrade workflow
 * Bad, because `helm template` is run twice in the full workflow (minor cost)
+
+---
+
+## Open Problem: Semantic Policy Validation (Partially Addressed)
+
+### Problem
+
+`helm template` validates *rendering* — it confirms the chart produces YAML
+without errors. It cannot detect semantic misconfigurations in the values
+themselves: required keys falling back to chart defaults (e.g. `cassandra.host`
+defaulting to `localhost`), placeholder values left in production secrets, or
+conditional invariants violated (e.g. federation enabled without a domain set).
+
+These violations are invisible to `helm template` and only surface at runtime.
+
+### Decision
+
+A lightweight **declarative policy check** (step 0) was added to
+`validate-values`, running *before* `helm template`. It is implemented without
+external binary dependencies.
+
+**Implementation:**
+
+- `wire_upgrade/values_validator.py` — loads a spec and runs three checks:
+  1. `check_required` — paths that must be explicitly set (not absent or empty)
+  2. `check_conditionals` — paths required only when a feature flag is `true`
+  3. `check_forbidden` — known placeholder values (`localhost`, empty strings)
+
+- `wire_upgrade/schemas/{chart_name}.yaml` — declarative spec per chart.
+  Ships with the wheel; operators extend it for environment-specific rules.
+
+- `wire_upgrade/values_validate.py` — step 0 calls `values_validator.validate()`.
+  Fails fast (returns exit 1) if any violation is found, before running
+  `helm template`.
+
+**Updated `validate-values` workflow:**
+
+```
+Step 0: policy check        ← NEW — fails fast on missing/placeholder values
+Step 1: helm dependency list
+Step 2: helm template
+Step 3: values diff
+Step 4: chart defaults audit
+```
+
+**Example spec (`wire_upgrade/schemas/wire-server.yaml`):**
+
+```yaml
+required:
+  - path: brig.config.cassandra.host
+    message: "must be set (chart default is 'localhost')"
+
+conditional:
+  - if: federator.enabled
+    require:
+      - path: federator.config.externalEndpoint
+        message: "must be set when federation is enabled"
+
+forbidden_values:
+  - path: brig.config.cassandra.host
+    values: ["localhost", "127.0.0.1"]
+    message: "must not be localhost in production"
+```
+
+### What This Does Not Cover
+
+`helm template` still does not validate whether rendered manifests satisfy
+Wire's operational policies (e.g. no containers running as root, resource
+limits set). That remains a future problem addressable with `conftest` + OPA
+Rego policies once `conftest` is present in the Wire bundle.
+
+### Consequences
+
+* Good — catches the most common values mistakes (missing required config,
+  localhost defaults, placeholder passwords) before touching the cluster
+* Good — no external binary dependency; runs anywhere the tool is installed
+* Good — spec files are human-readable YAML; operators can review and extend
+* Bad — spec must be manually maintained as the Wire chart evolves
+* Bad — only covers paths the spec author anticipated; silent on unknown gaps

@@ -14,6 +14,7 @@ import yaml
 
 from wire_upgrade.chart_install import find_values_files, _resolve_chart_path, _show_values_diff
 from wire_upgrade.config import Logger
+from wire_upgrade import values_validator
 
 
 def _defaults_not_covered(all_vals: dict, user_vals: dict) -> dict:
@@ -70,6 +71,8 @@ def validate_chart_values(
     """Validate values files against a Helm chart.
 
     Steps:
+      0. policy check      — required keys present, conditionals satisfied,
+                             no forbidden placeholder values; fails fast
       1. helm dependency list  — show sub-chart dependencies (non-fatal)
       2. helm template         — render full chart with custom values applied,
                                  including all sub-charts in their correct context;
@@ -116,6 +119,24 @@ def validate_chart_values(
         logger.info(f"Using values files: {', '.join(values_files)}")
     else:
         logger.info("No values files found — validating chart defaults only")
+
+    # ------------------------------------------------------------------ #
+    # 0. Policy check — required keys, conditionals, forbidden values      #
+    # ------------------------------------------------------------------ #
+    passed, policy_errors = values_validator.validate(
+        values_files=values_files,
+        chart_name=chart_name,
+        new_bundle=new_bundle,
+        logger=logger,
+    )
+    if not passed:
+        logger.error(f"Policy check failed ({len(policy_errors)} issue(s)):")
+        for msg in policy_errors:
+            console.print(f"  [red]{msg}[/red]")
+        return 1
+    if policy_errors is not None:
+        # spec was found and all checks passed (None = no spec, list = checked)
+        logger.success("Policy check passed — all required values are set")
 
     # ------------------------------------------------------------------ #
     # 1. Dependency list (informational, non-fatal)                        #
