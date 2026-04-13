@@ -123,7 +123,7 @@ def validate_chart_values(
     # ------------------------------------------------------------------ #
     # 0. Policy check — required keys, conditionals, forbidden values      #
     # ------------------------------------------------------------------ #
-    passed, policy_errors = values_validator.validate(
+    passed, policy_errors, policy_warnings = values_validator.validate(
         values_files=values_files,
         chart_name=chart_name,
         new_bundle=new_bundle,
@@ -137,6 +137,8 @@ def validate_chart_values(
     if policy_errors is not None:
         # spec was found and all checks passed (None = no spec, list = checked)
         logger.success("Policy check passed — all required values are set")
+    for msg in policy_warnings:
+        console.print(f"  [yellow]{msg}[/yellow]")
 
     # ------------------------------------------------------------------ #
     # 1. Dependency list (informational, non-fatal)                        #

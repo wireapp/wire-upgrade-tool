@@ -13,6 +13,7 @@ misconfigurations are caught early without needing a cluster.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -37,10 +38,12 @@ def _get_nested(data: dict, dotted_path: str):
 
 
 def _is_set(value) -> bool:
-    """True if the value is considered explicitly configured (not None/empty)."""
+    """True if the value is considered explicitly configured (not None/empty/empty-list)."""
     if value is None:
         return False
     if isinstance(value, str) and not value.strip():
+        return False
+    if isinstance(value, list) and len(value) == 0:
         return False
     return True
 
@@ -123,6 +126,47 @@ def check_conditionals(values: dict, spec: dict) -> list[str]:
     return errors
 
 
+def check_patterns(values: dict, spec: dict) -> list[str]:
+    """Return error messages for values that don't match a required pattern.
+
+    Each rule specifies a ``path``, a ``pattern`` (regex), and optionally
+    ``each: true`` to apply the pattern to every element of a list value.
+    """
+    errors: list[str] = []
+    for item in spec.get("patterns", []):
+        path = item["path"]
+        pattern = item["pattern"]
+        each = item.get("each", False)
+        msg = item.get("message", f"{path} does not match required pattern '{pattern}'")
+
+        value = _get_nested(values, path)
+        if not _is_set(value):
+            continue  # already caught by required/warnings checks
+
+        targets = value if (each and isinstance(value, list)) else [value]
+        for entry in targets:
+            if not re.match(pattern, str(entry)):
+                errors.append(f"INVALID {path}: {msg} (got: {entry!r})")
+
+    return errors
+
+
+def check_warnings(values: dict, spec: dict) -> list[str]:
+    """Return warning messages for advisory paths that are absent or empty.
+
+    Same logic as ``check_required`` but non-blocking — the caller displays
+    these as warnings and continues rather than failing.
+    """
+    warnings: list[str] = []
+    for item in spec.get("warnings", []):
+        path = item["path"]
+        value = _get_nested(values, path)
+        if not _is_set(value):
+            msg = item.get("message", f"{path} is not set")
+            warnings.append(f"WARN  {path}: {msg}")
+    return warnings
+
+
 def check_forbidden(values: dict, spec: dict) -> list[str]:
     """Return error messages for paths whose values are known placeholders."""
     errors: list[str] = []
@@ -147,10 +191,10 @@ def validate(
     chart_name: str,
     new_bundle: Path,
     logger,
-) -> tuple[bool, list[str] | None]:
+) -> tuple[bool, list[str] | None, list[str]]:
     """Validate values files against the chart's operational requirements spec.
 
-    Merges all values files (same order as Helm) and runs all three checks.
+    Merges all values files (same order as Helm) and runs all checks.
 
     Args:
         values_files: List of values file paths (absolute or relative to bundle).
@@ -159,11 +203,13 @@ def validate(
         logger:       Logger instance for info/warn messages.
 
     Returns:
-        ``(passed, errors)`` where *errors* is:
+        ``(passed, errors, warnings)`` where *errors* is:
 
         - ``None``      — no spec file found; validation was skipped
         - ``[]``        — spec found, all checks passed
         - ``[msg, …]``  — spec found, one or more violations; *passed* is False
+
+        *warnings* is always a list (may be empty); non-blocking advisories.
     """
     spec = load_spec(chart_name)
     if spec is None:
@@ -171,7 +217,7 @@ def validate(
             f"No validation spec for chart '{chart_name}' "
             f"(wire_upgrade/schemas/{chart_name}.yaml not found) — skipping policy check"
         )
-        return True, None
+        return True, None, []
 
     # Resolve paths: absolute paths used as-is, relative paths resolved from bundle root
     resolved: list[Path] = []
@@ -185,5 +231,8 @@ def validate(
     errors.extend(check_required(merged, spec))
     errors.extend(check_conditionals(merged, spec))
     errors.extend(check_forbidden(merged, spec))
+    errors.extend(check_patterns(merged, spec))
 
-    return len(errors) == 0, errors
+    warnings: list[str] = check_warnings(merged, spec)
+
+    return len(errors) == 0, errors, warnings

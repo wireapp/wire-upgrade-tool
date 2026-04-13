@@ -133,6 +133,29 @@ required:
       instance domain. The chart default 'example.com' must be replaced.
 
 # ---------------------------------------------------------------------------
+# Patterns: regex validation on values or list elements (each: true)
+# ---------------------------------------------------------------------------
+patterns:
+  # TURN URIs must start with turn: or turns:
+  - path: brig.turnStatic.v2
+    each: true
+    pattern: "^turns?:"
+    message: >
+      each entry in brig.turnStatic.v2 must be a valid TURN URI starting with
+      'turn:' or 'turns:' (e.g. 'turn:203.0.113.1:3478' or
+      'turn:203.0.113.1:3478?transport=tcp')
+
+# ---------------------------------------------------------------------------
+# Warnings: advisory checks — non-blocking, displayed in yellow
+# ---------------------------------------------------------------------------
+warnings:
+  # TURN servers — required for audio/video calls; empty list means calling broken
+  - path: brig.turnStatic.v2
+    message: >
+      brig.turnStatic.v2 is empty. No TURN servers are configured — audio/video
+      calls will not work. Add at least one TURN server entry.
+
+# ---------------------------------------------------------------------------
 # Conditional: only required when a feature is explicitly enabled
 # ---------------------------------------------------------------------------
 conditional:
