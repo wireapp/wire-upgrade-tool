@@ -1,0 +1,221 @@
+# Validation spec for the wire-server Helm chart.
+#
+# This file drives `wire-upgrade validate-values` step 0: policy check.
+# Add paths here that operators MUST explicitly configure in values.yaml or
+# secrets.yaml for a production Wire Server deployment.
+#
+# Path syntax: dot-separated key path matching the YAML structure.
+# Example: "brig.config.cassandra.host" matches:
+#   brig:
+#     config:
+#       cassandra:
+#         host: <value>
+#
+# Sections:
+#   required         — paths that must be present and non-empty (hard fail)
+#   patterns         — regex validation on values or list elements (hard fail)
+#   warnings         — advisory checks; non-blocking, displayed in yellow
+#   conditional      — paths required only when a feature flag is true (hard fail)
+#   forbidden_values — placeholder strings that must not reach production (hard fail)
+
+# ---------------------------------------------------------------------------
+# Required: must be explicitly set in values.yaml
+# ---------------------------------------------------------------------------
+required:
+  # Cassandra — per-service host (replicationFactor is shared via cassandra-migrations)
+  - path: brig.config.cassandra.host
+    message: >
+      brig.config.cassandra.host must be set (chart default is 'localhost').
+      Set to your Cassandra service name, e.g. 'cassandra-external'.
+  - path: galley.config.cassandra.host
+    message: >
+      galley.config.cassandra.host must be set (chart default is 'localhost').
+  - path: gundeck.config.cassandra.host
+    message: >
+      gundeck.config.cassandra.host must be set (chart default is 'localhost').
+  - path: spar.config.cassandra.host
+    message: >
+      spar.config.cassandra.host must be set (chart default is 'localhost').
+  - path: background-worker.config.cassandra.host
+    message: >
+      background-worker.config.cassandra.host must be set.
+
+  # cassandra-migrations sub-chart — shared replication config
+  - path: cassandra-migrations.cassandra.host
+    message: >
+      cassandra-migrations.cassandra.host must be set.
+  - path: cassandra-migrations.cassandra.replicationFactor
+    message: >
+      cassandra-migrations.cassandra.replicationFactor must be set explicitly.
+      Typical production value is 3.
+
+  # Redis — required for gundeck notifications
+  - path: gundeck.config.redis.host
+    message: >
+      gundeck.config.redis.host must be set.
+      Typically 'redis-external' or your Redis service name.
+
+  # Elasticsearch — required for search
+  - path: brig.config.elasticsearch.host
+    message: >
+      brig.config.elasticsearch.host must be set.
+
+  # PostgreSQL — required for brig user data
+  - path: brig.config.postgresql.host
+    message: >
+      brig.config.postgresql.host must be set (e.g. 'postgresql-external-rw').
+
+  # RabbitMQ — required for brig event queue
+  - path: brig.config.rabbitmq.host
+    message: >
+      brig.config.rabbitmq.host must be set (e.g. 'rabbitmq-external').
+
+  # Public-facing nginz URL — required for email links and callbacks
+  - path: brig.config.externalUrls.nginz
+    message: >
+      brig.config.externalUrls.nginz must be set to the public HTTPS endpoint
+      of this Wire instance (e.g. 'https://nginz-https.example.com').
+
+  # Federation domain — always required, not just when federator is enabled
+  - path: brig.config.optSettings.setFederationDomain
+    message: >
+      brig.config.optSettings.setFederationDomain must be set to the Wire
+      instance domain (e.g. 'wire.example.com').
+
+  # ---------------------------------------------------------------------------
+  # galley
+  # ---------------------------------------------------------------------------
+  - path: galley.config.postgresql.host
+    message: "galley.config.postgresql.host must be set (e.g. 'postgresql-external-rw')"
+  - path: galley.config.rabbitmq.host
+    message: "galley.config.rabbitmq.host must be set (e.g. 'rabbitmq-external')"
+  - path: galley.config.settings.federationDomain
+    message: >
+      galley.config.settings.federationDomain must be set to the Wire instance
+      domain (e.g. 'wire.example.com').
+  - path: galley.config.settings.conversationCodeURI
+    message: >
+      galley.config.settings.conversationCodeURI must be set to the public
+      account app URL (e.g. 'https://account.example.com/conversation-join/').
+
+  # ---------------------------------------------------------------------------
+  # gundeck
+  # ---------------------------------------------------------------------------
+  - path: gundeck.config.rabbitmq.host
+    message: "gundeck.config.rabbitmq.host must be set (e.g. 'rabbitmq-external')"
+
+  # ---------------------------------------------------------------------------
+  # spar
+  # ---------------------------------------------------------------------------
+  - path: spar.config.appUri
+    message: >
+      spar.config.appUri must be set to the public nginz HTTPS endpoint
+      (e.g. 'https://nginz-https.example.com').
+  - path: spar.config.domain
+    message: "spar.config.domain must be set to the Wire instance domain."
+  - path: spar.config.ssoUri
+    message: >
+      spar.config.ssoUri must be set to the public SSO endpoint
+      (e.g. 'https://nginz-https.example.com/sso').
+
+  # ---------------------------------------------------------------------------
+  # background-worker
+  # ---------------------------------------------------------------------------
+  - path: background-worker.config.rabbitmq.host
+    message: "background-worker.config.rabbitmq.host must be set (e.g. 'rabbitmq-external')"
+  - path: background-worker.config.postgresql.host
+    message: "background-worker.config.postgresql.host must be set (e.g. 'postgresql-external-rw')"
+  - path: background-worker.config.cassandraGalley.host
+    message: "background-worker.config.cassandraGalley.host must be set"
+  - path: background-worker.config.cassandraBrig.host
+    message: "background-worker.config.cassandraBrig.host must be set"
+  - path: background-worker.config.federationDomain
+    message: >
+      background-worker.config.federationDomain must be set to the Wire
+      instance domain. The chart default 'example.com' must be replaced.
+
+# ---------------------------------------------------------------------------
+# Patterns: regex validation on values or list elements (each: true)
+# ---------------------------------------------------------------------------
+patterns:
+  # TURN URIs must start with turn:
+  - path: brig.turnStatic.v2
+    each: true
+    pattern: "^turn:"
+    message: >
+      each entry in brig.turnStatic.v2 must be a valid TURN URI starting with
+      'turn:' (e.g. 'turn:203.0.113.1:3478' or
+      'turn:203.0.113.1:3478?transport=tcp')
+
+# ---------------------------------------------------------------------------
+# Warnings: advisory checks — non-blocking, displayed in yellow
+# ---------------------------------------------------------------------------
+warnings:
+  # TURN servers — required for audio/video calls; empty list means calling broken
+  - path: brig.turnStatic.v2
+    message: >
+      brig.turnStatic.v2 is empty. No TURN servers are configured — audio/video
+      calls will not work. Add at least one TURN server entry.
+
+# ---------------------------------------------------------------------------
+# Conditional: only required when a feature is explicitly enabled
+# ---------------------------------------------------------------------------
+conditional:
+  - if: federator.enabled
+    require:
+      - path: federator.config.externalEndpoint
+        message: >
+          federator.config.externalEndpoint must be set when federation is enabled.
+          This is the publicly reachable endpoint for this Wire instance.
+
+# ---------------------------------------------------------------------------
+# Forbidden values: placeholders that must not reach production
+# ---------------------------------------------------------------------------
+forbidden_values:
+  # Placeholder values: ["localhost", "127.0.0.1", "example.com"]
+
+  # Cassandra hosts
+  - path: brig.config.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "brig.config.cassandra.host is set to a placeholder value"
+  - path: galley.config.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "galley.config.cassandra.host is set to a placeholder value"
+  - path: gundeck.config.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "gundeck.config.cassandra.host is set to a placeholder value"
+  - path: spar.config.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "spar.config.cassandra.host is set to a placeholder value"
+  - path: cassandra-migrations.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "cassandra-migrations.cassandra.host is set to a placeholder value"
+  - path: background-worker.config.cassandra.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "background-worker.config.cassandra.host is set to a placeholder value"
+  - path: background-worker.config.cassandraGalley.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "background-worker.config.cassandraGalley.host is set to a placeholder value"
+  - path: background-worker.config.cassandraBrig.host
+    values: ["localhost", "127.0.0.1", "example.com"]
+    message: "background-worker.config.cassandraBrig.host is set to a placeholder value"
+
+  # Federation / domain fields
+  - path: background-worker.config.federationDomain
+    values: ["example.com", "localhost"]
+    message: >
+      background-worker.config.federationDomain is set to a placeholder value.
+      Replace with your Wire instance domain.
+  - path: galley.config.settings.federationDomain
+    values: ["example.com", "localhost"]
+    message: >
+      galley.config.settings.federationDomain is set to a placeholder value.
+      Replace with your Wire instance domain.
+  - path: brig.config.optSettings.setFederationDomain
+    values: ["example.com", "localhost"]
+    message: >
+      brig.config.optSettings.setFederationDomain is set to a placeholder value.
+      Replace with your Wire instance domain.
+  - path: spar.config.domain
+    values: ["example.com", "localhost"]
+    message: "spar.config.domain is set to a placeholder value"

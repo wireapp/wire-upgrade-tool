@@ -23,4 +23,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["wire_upgrade"]
+include = ["wire_upgrade", "wire_upgrade.*"]
+
+[tool.setuptools.package-data]
+wire_upgrade = ["schemas/*.yaml"]
