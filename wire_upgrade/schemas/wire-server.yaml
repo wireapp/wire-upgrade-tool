@@ -12,9 +12,11 @@
 #         host: <value>
 #
 # Sections:
-#   required        — paths that must be present and non-empty
-#   conditional     — paths required only when a feature flag is true
-#   forbidden_values — placeholder strings that must not reach production
+#   required         — paths that must be present and non-empty (hard fail)
+#   patterns         — regex validation on values or list elements (hard fail)
+#   warnings         — advisory checks; non-blocking, displayed in yellow
+#   conditional      — paths required only when a feature flag is true (hard fail)
+#   forbidden_values — placeholder strings that must not reach production (hard fail)
 
 # ---------------------------------------------------------------------------
 # Required: must be explicitly set in values.yaml
@@ -136,13 +138,13 @@ required:
 # Patterns: regex validation on values or list elements (each: true)
 # ---------------------------------------------------------------------------
 patterns:
-  # TURN URIs must start with turn: or turns:
+  # TURN URIs must start with turn:
   - path: brig.turnStatic.v2
     each: true
-    pattern: "^turns?:"
+    pattern: "^turn:"
     message: >
       each entry in brig.turnStatic.v2 must be a valid TURN URI starting with
-      'turn:' or 'turns:' (e.g. 'turn:203.0.113.1:3478' or
+      'turn:' (e.g. 'turn:203.0.113.1:3478' or
       'turn:203.0.113.1:3478?transport=tcp')
 
 # ---------------------------------------------------------------------------
