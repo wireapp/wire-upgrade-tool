@@ -50,7 +50,7 @@ class Logger:
         self.console = console or Console()
         self._ensure_log_dir()
 
-        self.timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d-%H%M%S")
+        self.timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
         self.log_file = self.log_dir / f"upgrade-{self.timestamp}.log"
         self.json_file = self.log_dir / f"upgrade-{self.timestamp}.json"
 
@@ -84,7 +84,7 @@ class Logger:
 
     def log(self, level: str, message: str, details: Optional[dict] = None):
         entry = {
-            "timestamp": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
             "level": level,
             "message": message,
             "details": details or {},
