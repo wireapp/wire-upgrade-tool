@@ -10,6 +10,9 @@ dependencies = [
   "PyYAML>=6.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+
 [project.scripts]
 wire-upgrade = "wire_upgrade.orchestrator:app"
 
@@ -27,3 +30,17 @@ include = ["wire_upgrade", "wire_upgrade.*"]
 
 [tool.setuptools.package-data]
 wire_upgrade = ["schemas/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["wire_upgrade"]
+omit = [
+    "wire_upgrade/wire_sync_binaries.py",
+    "wire_upgrade/wire_sync_images.py",
+    "wire_upgrade/wire_sync_chart_images.py",
+    "wire_upgrade/cleanup_containerd_images.py",
+    "wire_upgrade/cassandra_backup.py",
+]
