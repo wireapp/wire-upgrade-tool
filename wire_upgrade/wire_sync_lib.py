@@ -19,6 +19,21 @@ def host_name():
     return socket.gethostname()
 
 def ensure_dir(path: Path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    except PermissionError:
+        pass
+
+    # Fall back to sudo mkdir + chown so the current user owns the directory
+    cmd = (
+        f"sudo mkdir -p {shlex.quote(str(path))} && "
+        f"sudo chown {os.getuid()}:{os.getgid()} {shlex.quote(str(path))}"
+    )
+    proc = subprocess.Popen(["bash", "-lc", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc.communicate()
+    if proc.returncode != 0:
+        raise PermissionError(f"Cannot create log directory {path} (sudo also failed)")
     path.mkdir(parents=True, exist_ok=True)
 
 def run_cmd(cmd, env=None, verbose=False):

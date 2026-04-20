@@ -22,8 +22,8 @@ LOG_DIR = "/var/log/upgrade-orchestrator"
 
 
 class Config(BaseModel):
-    new_bundle: str
-    old_bundle: str
+    new_bundle: Optional[str] = None
+    old_bundle: Optional[str] = None
     kubeconfig: Optional[str] = None
     log_dir: str = LOG_DIR
     tools_dir: Optional[str] = None
