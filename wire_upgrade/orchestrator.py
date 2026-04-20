@@ -704,33 +704,37 @@ class UpgradeOrchestrator:
             self.logger.error("Could not determine expected schema versions")
             return 1
 
-        query = "SELECT version FROM {keyspace}.meta WHERE id=1 ORDER BY version DESC LIMIT 1;"
-        mismatches = []
+        # Run all keyspace queries in a single cqlsh session to avoid per-call
+        # startup overhead (~20s each). Build one -e string with all SELECT
+        # statements separated by semicolons.
+        query_tmpl = "SELECT version FROM {keyspace}.meta WHERE id=1 ORDER BY version DESC LIMIT 1;"
+        keyspaces = list(expected.keys())
+        combined = " ".join(query_tmpl.format(keyspace=ks) for ks in keyspaces)
+        cmd = (
+            f"kubectl exec -n {namespace} wire-utility-0 -- cqlsh cassandra-external "
+            f"-e \"{combined}\""
+        )
+        rc, out, err = self.run_kubectl(cmd)
+        if rc != 0:
+            self.logger.error(f"cqlsh batch query failed: {err.strip()}")
+            return 1
 
-        for keyspace, expected_version in expected.items():
-            cmd = (
-                f"kubectl exec -n {namespace} wire-utility-0 -- cqlsh cassandra-external "
-                f"-e \"{query.format(keyspace=keyspace)}\""
-            )
-            rc, out, err = self.run_kubectl(cmd)
-            if rc != 0:
-                self.logger.warn(f"{keyspace}: failed to query meta (rc={rc})")
-                if err:
-                    console.print(err, style="red")
-                mismatches.append((keyspace, "unknown", expected_version))
-                continue
-
+        # Parse output: cqlsh prints one result block per SELECT, each ending
+        # with a blank line. Extract the single integer version from each block.
+        blocks = [b.strip() for b in out.split("\n\n") if b.strip()]
+        versions: dict[str, int | str] = {}
+        for ks, block in zip(keyspaces, blocks):
             version = None
-            for line in out.splitlines():
+            for line in block.splitlines():
                 line = line.strip()
                 if line.isdigit():
                     version = int(line)
                     break
+            versions[ks] = version if version is not None else "missing"
 
-            if version is None:
-                mismatches.append((keyspace, "missing", expected_version))
-                continue
-
+        mismatches = []
+        for keyspace, expected_version in expected.items():
+            version = versions.get(keyspace, "missing")
             status = "OK" if version == expected_version else "MISMATCH"
             console.print(f"{keyspace}: meta={version} expected={expected_version} [{status}]")
             if version != expected_version:
@@ -949,11 +953,13 @@ class UpgradeOrchestrator:
         table.add_column("Extra", justify="right")
 
         for index_path, data in results.items():
+            if "error" in data:
+                table.add_row(index_path, "-", "-", "-", "-")
+                continue
             expected = data["expected"]
             index_entries = data["index"]
             missing = data["missing"]
             extra = data["extra"]
-
             table.add_row(
                 index_path,
                 str(len(expected)),
@@ -964,7 +970,12 @@ class UpgradeOrchestrator:
 
         console.print(table)
 
+        has_errors = False
         for index_path, data in results.items():
+            if "error" in data:
+                self.logger.error(f"{index_path}: {data['error']}")
+                has_errors = True
+                continue
             missing = data["missing"]
             extra = data["extra"]
             if not missing and not extra:
@@ -983,7 +994,7 @@ class UpgradeOrchestrator:
                 if len(extra) > 20:
                     self.logger.warn(f"  ... {len(extra) - 20} more")
 
-        return 0
+        return 1 if has_errors else 0
 
 
 def get_orchestrator(ctx: typer.Context) -> UpgradeOrchestrator:

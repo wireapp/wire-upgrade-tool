@@ -50,18 +50,37 @@ def compare_assets(
     results: Dict[str, Dict[str, List[str]]] = {}
     for index_path, versions_file in ASSET_INDEX_MAP.items():
         versions_path = bundle_root / "versions" / versions_file
-        entries, normalized = _load_index_via_ssh(ssh_user, assethost, index_path)
-        expected = _load_versions(versions_path)
 
+        try:
+            entries, normalized = _load_index_via_ssh(ssh_user, assethost, index_path)
+        except FileNotFoundError as exc:
+            results[index_path] = {
+                "error": str(exc),
+                "expected": [],
+                "index": [],
+                "missing": [],
+                "extra": [],
+            }
+            continue
+
+        if not versions_path.exists():
+            results[index_path] = {
+                "error": f"versions file not found in bundle: {versions_path}",
+                "expected": [],
+                "index": list(entries),
+                "missing": [],
+                "extra": [],
+            }
+            continue
+
+        expected = _load_versions(versions_path)
         idx_set = set(normalized)
         expected_set = set(expected)
-        missing = sorted(expected_set - idx_set)
-        extra = sorted(idx_set - expected_set)
 
         results[index_path] = {
             "expected": expected,
             "index": entries,
-            "missing": missing,
-            "extra": extra,
+            "missing": sorted(expected_set - idx_set),
+            "extra": sorted(idx_set - expected_set),
         }
     return results

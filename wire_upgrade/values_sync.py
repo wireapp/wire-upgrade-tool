@@ -198,7 +198,7 @@ def sync_chart_values(
         return False
 
     # Backup raw cluster values (single source-of-truth snapshot before any merge)
-    backup_path = values_dir / f"helm-values-backup-{timestamp}.yaml"
+    backup_path = values_dir / f"values-backup-{timestamp}.yaml"
     try:
         backup_path.write_text(_yaml_dump(helm_values))
         logger.info(f"Cluster snapshot backed up: {backup_path}")

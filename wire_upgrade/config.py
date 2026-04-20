@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, ValidationError, validator
+from pydantic import BaseModel, ValidationError, field_validator
 from rich.console import Console
 from rich.markup import escape as markup_escape
 from rich.panel import Panel
@@ -22,8 +22,8 @@ LOG_DIR = "/var/log/upgrade-orchestrator"
 
 
 class Config(BaseModel):
-    new_bundle: str
-    old_bundle: str
+    new_bundle: Optional[str] = None
+    old_bundle: Optional[str] = None
     kubeconfig: Optional[str] = None
     log_dir: str = LOG_DIR
     tools_dir: Optional[str] = None
@@ -34,7 +34,8 @@ class Config(BaseModel):
     snapshot_name: Optional[str] = None
 
     # If kubeconfig is explicitly set, verify the file exists at load time.
-    @validator("kubeconfig")
+    @field_validator("kubeconfig")
+    @classmethod
     def validate_kubeconfig(cls, v):
         if v is None:
             return v
@@ -49,7 +50,7 @@ class Logger:
         self.console = console or Console()
         self._ensure_log_dir()
 
-        self.timestamp = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        self.timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
         self.log_file = self.log_dir / f"upgrade-{self.timestamp}.log"
         self.json_file = self.log_dir / f"upgrade-{self.timestamp}.json"
 
@@ -83,7 +84,7 @@ class Logger:
 
     def log(self, level: str, message: str, details: Optional[dict] = None):
         entry = {
-            "timestamp": dt.datetime.utcnow().isoformat() + "Z",
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
             "level": level,
             "message": message,
             "details": details or {},
@@ -238,7 +239,17 @@ def resolve_config(
         old_bundle_path = Path(merged["old_bundle"])
         if old_bundle_path.is_dir():
             found = find_kubeconfig_in_bundle(old_bundle_path)
-            if found:
+            if found and merged.get("new_bundle"):
+                # Copy kubeconfig from old bundle to new bundle
+                new_bundle_path = Path(merged["new_bundle"])
+                new_kubeconfig = new_bundle_path / "kubeconfig"
+                try:
+                    new_kubeconfig.write_text(found.read_text())
+                    merged["kubeconfig"] = str(new_kubeconfig)
+                except Exception:
+                    # If copy fails, use old location
+                    merged["kubeconfig"] = str(found)
+            elif found:
                 merged["kubeconfig"] = str(found)
 
     try:

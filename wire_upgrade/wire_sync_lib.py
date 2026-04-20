@@ -11,7 +11,7 @@ from typing import Optional
 from pathlib import Path
 
 def now_ts():
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 BUNDLE_ROOT = os.environ.get("WIRE_BUNDLE_ROOT") or "/home/demo/new"
 
@@ -19,10 +19,25 @@ def host_name():
     return socket.gethostname()
 
 def ensure_dir(path: Path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    except PermissionError:
+        pass
+
+    # Fall back to sudo mkdir + chown so the current user owns the directory
+    cmd = (
+        f"sudo mkdir -p {shlex.quote(str(path))} && "
+        f"sudo chown {os.getuid()}:{os.getgid()} {shlex.quote(str(path))}"
+    )
+    proc = subprocess.Popen(["bash", "-lc", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc.communicate()
+    if proc.returncode != 0:
+        raise PermissionError(f"Cannot create log directory {path} (sudo also failed)")
     path.mkdir(parents=True, exist_ok=True)
 
 def run_cmd(cmd, env=None, verbose=False):
-    start = dt.datetime.utcnow()
+    start = dt.datetime.now(dt.timezone.utc)
     if verbose:
         proc = subprocess.Popen(
             cmd,
@@ -38,12 +53,12 @@ def run_cmd(cmd, env=None, verbose=False):
         env=env,
     )
     out, err = proc.communicate()
-    end = dt.datetime.utcnow()
+    end = dt.datetime.now(dt.timezone.utc)
     return proc.returncode, out, err, int((end - start).total_seconds() * 1000)
 
 def write_audit(log_dir: Path, base_name: str, audit: dict, summary_lines: list, ts_override: Optional[str] = None):
     ensure_dir(log_dir)
-    ts = ts_override or dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = ts_override or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     json_path = log_dir / f"{ts}_{base_name}.json"
     txt_path = log_dir / f"{ts}_{base_name}.txt"
     json_path.write_text(json.dumps(audit, indent=2, sort_keys=False))
