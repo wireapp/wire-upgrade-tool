@@ -42,7 +42,7 @@ Complete these steps **in order** before running any upgrade commands:
 Install the latest release directly on the admin host:
 
 ```sh
-pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.5/wire_upgrade-0.1.5-py3-none-any.whl
+pip install https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.6/wire_upgrade-0.1.6-py3-none-any.whl
 ```
 
 If `wire-upgrade` is not found after install, pip placed the script in
@@ -57,7 +57,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 Re-run the same install command with `--upgrade`:
 
 ```sh
-pip install --upgrade https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.5/wire_upgrade-0.1.5-py3-none-any.whl
+pip install --upgrade https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.6/wire_upgrade-0.1.6-py3-none-any.whl
 ```
 
 ### On an admin host without internet access
@@ -67,7 +67,7 @@ host, then install:
 
 ```sh
 # machine with internet access
-curl -LO https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.5/wire_upgrade-0.1.5-py3-none-any.whl
+curl -LO https://github.com/wireapp/wire-upgrade-tool/releases/download/v0.1.6/wire_upgrade-0.1.6-py3-none-any.whl
 scp wire_upgrade-0.1.1-py3-none-any.whl <admin-host>:/tmp/
 
 # on the admin host
